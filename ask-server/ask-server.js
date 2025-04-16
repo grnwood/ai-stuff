@@ -10,8 +10,6 @@ const PORT = process.env.PORT || 3000
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 const API_SECRET_TOKEN = process.env.API_SECRET_TOKEN
 
-console.log("sec token: "+API_SECRET_TOKEN)
-
 if (!OPENAI_API_KEY || !API_SECRET_TOKEN) {
   console.error('❌ Missing OPENAI_API_KEY or API_SECRET_TOKEN in .env')
   process.exit(1)
@@ -31,7 +29,7 @@ app.use((req, res, next) => {
 })
 
 app.post('/chat', async (req, res) => {
-  const { messages, model = 'gpt-3.5-turbo' } = req.body
+    const { messages, model = 'gpt-3.5-turbo' } = req.body
 
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Missing or invalid messages array' })
