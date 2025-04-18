@@ -49,8 +49,8 @@ def main():
     if system:
         payload["system"] = system
 
-    print("Sending payload to proxy:")
-    print(payload)
+    #print("Sending payload to proxy:")
+    #print(payload)
     try:
         headers = {
             "Content-Type": "application/json",
