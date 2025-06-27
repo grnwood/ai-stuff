@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog, filedialog
 from tkinter.scrolledtext import ScrolledText
 import requests
 import os
@@ -27,6 +27,13 @@ def init_db():
                     session_id INTEGER,
                     role TEXT,
                     content TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(id)
+                )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS input_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    content TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
                 )''')
     conn.commit()
@@ -64,11 +71,61 @@ def save_message(session_id, role, content):
     conn.commit()
     conn.close()
 
+def save_input_history(session_id, content):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO input_history (session_id, content) VALUES (?, ?)", (session_id, content))
+    conn.commit()
+    conn.close()
+
+def get_input_history(session_id, limit=25):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT content FROM input_history WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?", (session_id, limit))
+    history = [row[0] for row in c.fetchall()]
+    conn.close()
+    return list(reversed(history))
+
+def delete_input_history_for_session(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM input_history WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
+def update_session_name(session_id, new_name):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET name = ? WHERE id = ?", (new_name, session_id))
+    conn.commit()
+    conn.close()
+
+def delete_session_and_messages(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    c.execute("DELETE FROM input_history WHERE session_id = ?", (session_id,))
+    c.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
 # --- API ---
 def send_to_api(session_name, messages):
+    ai_content = messages[-1]['content']
+    prompt_content = ""
+    system_content = None
+
+    for msg in messages[:-1]:
+        if msg['role'] == 'system':
+            system_content = msg['content']
+        else:
+            prompt_content += f"{msg['role'].title()}: {msg['content']}\n\n"
+
     payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": messages,
+        "model": "gpt-3.5-turbo", # Default model, can be made configurable later
+        "prompt": prompt_content.strip(),
+        "ai": ai_content,
+        "system": system_content,
         "session_id": session_name,
         "stream": False
     }
@@ -109,8 +166,51 @@ class ChatApp(tk.Tk):
         init_db()
         self.session_id = None
         self.session_name = None
+        self.message_history = []
+        self.history_index = -1
         self.build_gui()
         self.load_sessions()
+
+    def show_session_context_menu(self, event):
+        try:
+            self.session_list.selection_clear(0, tk.END)
+            self.session_list.selection_set(self.session_list.nearest(event.y))
+            self.session_context_menu.post(event.x_root, event.y_root)
+        finally:
+            self.session_context_menu.grab_release()
+
+    def rename_session(self):
+        try:
+            index = self.session_list.curselection()[0]
+            old_name = self.session_list.get(index)
+            session_id = self.get_session_id_by_name(old_name)
+
+            new_name = tk.simpledialog.askstring("Rename Session", "Enter new session name:", initialvalue=old_name)
+            if new_name and new_name != old_name:
+                update_session_name(session_id, new_name)
+                self.load_sessions()
+                if self.session_id == session_id:
+                    self.session_name = new_name
+        except IndexError:
+            pass
+
+    def delete_session(self):
+        try:
+            index = self.session_list.curselection()[0]
+            session_name = self.session_list.get(index)
+            session_id = self.get_session_id_by_name(session_name)
+
+            if messagebox.askyesno("Delete Session", f"Are you sure you want to delete session '{session_name}' and all its messages?"):
+                delete_session_and_messages(session_id)
+                self.load_sessions()
+                if self.session_id == session_id:
+                    self.session_id = None
+                    self.session_name = None
+                    self.chat_history.configure(state="normal")
+                    self.chat_history.delete("1.0", tk.END)
+                    self.chat_history.configure(state="disabled")
+        except IndexError:
+            pass
 
     def build_gui(self):
         self.columnconfigure(1, weight=1)
@@ -124,9 +224,20 @@ class ChatApp(tk.Tk):
         self.session_list = tk.Listbox(self.left_frame)
         self.session_list.grid(row=0, column=0, sticky="nsew")
         self.session_list.bind('<<ListboxSelect>>', self.select_session)
+        self.session_list.bind('<Button-3>', self.show_session_context_menu)
+
+        self.session_context_menu = tk.Menu(self.session_list, tearoff=0)
+        self.session_context_menu.add_command(label="Rename", command=self.rename_session)
+        self.session_context_menu.add_command(label="Delete", command=self.delete_session)
 
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
         self.new_button.grid(row=1, column=0, sticky="ew")
+
+        self.export_button = ttk.Button(self.left_frame, text="Export Chat", command=self.export_chat)
+        self.export_button.grid(row=2, column=0, sticky="ew")
+
+        self.import_button = ttk.Button(self.left_frame, text="Import Chat", command=self.import_chat)
+        self.import_button.grid(row=3, column=0, sticky="ew")
 
         # --- Main Chat Area ---
         self.main_frame = ttk.Frame(self)
@@ -137,14 +248,97 @@ class ChatApp(tk.Tk):
         self.chat_history = ScrolledText(self.main_frame, state="disabled", wrap=tk.WORD, bg="white")
         self.chat_history.grid(row=0, column=0, sticky="nsew")
 
-        self.input_box = tk.Text(self.main_frame, height=5, wrap=tk.WORD)
-        self.input_box.grid(row=1, column=0, sticky="ew")
+        self.input_container_frame = ttk.Frame(self.main_frame)
+        self.input_container_frame.grid(row=1, column=0, sticky="ew")
+        self.input_container_frame.columnconfigure(0, weight=1)
+
+        self.input_box = tk.Text(self.input_container_frame, height=5, wrap=tk.WORD)
+        self.input_box.grid(row=0, column=0, sticky="ew")
         self.input_box.bind("<Control-Return>", self.send_message)
+        self.input_box.bind("<Up>", self.history_up)
+        self.input_box.bind("<Down>", self.history_down)
+
+        self.send_button = ttk.Button(self.input_container_frame, text="Send", command=self.send_message)
+        self.send_button.grid(row=0, column=1, sticky="e")
+
+    def export_chat(self):
+        if not self.session_id:
+            messagebox.showinfo("Export Chat", "No session selected to export.")
+            return
+
+        messages = get_messages(self.session_id)
+        if not messages:
+            messagebox.showinfo("Export Chat", "Current session has no messages to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=f"{self.session_name.replace(' ', '_')}_chat.json"
+        )
+
+        if file_path:
+            try:
+                with open(file_path, 'w') as f:
+                    json.dump(messages, f, indent=4)
+                messagebox.showinfo("Export Chat", "Chat exported successfully!")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export chat: {e}")
+
+    def import_chat(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    imported_messages = json.load(f)
+
+                if not isinstance(imported_messages, list):
+                    raise ValueError("Invalid JSON format. Expected a list of messages.")
+
+                new_session_name = tk.simpledialog.askstring("Import Chat", "Enter a name for the new session:",
+                                                              initialvalue=f"Imported Chat {len(get_sessions()) + 1}")
+                if not new_session_name:
+                    return
+
+                session_id = create_session(new_session_name)
+                for role, content in imported_messages:
+                    save_message(session_id, role, content)
+
+                self.load_sessions()
+                self.session_list.selection_clear(0, tk.END)
+                # Find the index of the newly created session and select it
+                sessions = get_sessions()
+                for i, (_id, name) in enumerate(sessions):
+                    if _id == session_id:
+                        self.session_list.selection_set(i)
+                        self.session_list.event_generate('<<ListboxSelect>>')
+                        break
+
+                messagebox.showinfo("Import Chat", "Chat imported successfully!")
+
+            except json.JSONDecodeError:
+                messagebox.showerror("Import Error", "Invalid JSON file.")
+            except ValueError as e:
+                messagebox.showerror("Import Error", f"Error importing chat: {e}")
+            except Exception as e:
+                messagebox.showerror("Import Error", f"An unexpected error occurred: {e}")
 
     def load_sessions(self):
         self.session_list.delete(0, tk.END)
-        for _id, name in get_sessions():
+        sessions = get_sessions()
+        for _id, name in sessions:
             self.session_list.insert(tk.END, name)
+
+        if sessions:
+            # Select the first session by default if any exist
+            self.session_list.selection_set(0)
+            self.session_list.event_generate('<<ListboxSelect>>')
+        else:
+            # Create a new session if no sessions exist
+            self.new_session()
 
     def select_session(self, event):
         try:
@@ -153,6 +347,8 @@ class ChatApp(tk.Tk):
             self.session_name = session_name
             self.session_id = self.get_session_id_by_name(session_name)
             self.load_chat_history()
+            self.message_history = get_input_history(self.session_id)
+            self.history_index = len(self.message_history)
         except IndexError:
             return
 
@@ -180,6 +376,7 @@ class ChatApp(tk.Tk):
         messages = get_messages(self.session_id)
         for role, content in messages:
             self.chat_history.insert(tk.END, f"{role.title()}:\n{markdown_to_text(content)}\n\n")
+        self.chat_history.see(tk.END)
         self.chat_history.configure(state="disabled")
 
     def send_message(self, event=None):
@@ -188,17 +385,58 @@ class ChatApp(tk.Tk):
             return "break"
 
         save_message(self.session_id, "user", content)
+        save_input_history(self.session_id, content) # Save to input history
+        self.message_history = get_input_history(self.session_id) # Reload history for current session
+        self.history_index = len(self.message_history) # Reset index to end after sending
+
         messages = get_messages(self.session_id)
         message_blocks = [{"role": role, "content": content} for role, content in messages]
+
+        self.input_box.configure(state="disabled")
+        self.chat_history.configure(state="normal")
+        self.chat_history.insert(tk.END, "\nSending...\n", ("sending_tag"))
+        self.chat_history.see(tk.END)
+        self.chat_history.configure(state="disabled")
+        self.update_idletasks() # Update GUI immediately
 
         try:
             assistant_reply = send_to_api(self.session_name, message_blocks)
             save_message(self.session_id, "assistant", assistant_reply)
             self.load_chat_history()
-            self.input_box.delete("1.0", tk.END)
+        except requests.exceptions.RequestException as e:
+            messagebox.showerror("Network Error", f"Could not connect to the server or API: {e}")
+            self.chat_history.configure(state="normal")
+            self.chat_history.delete("end-2l", "end-1c") # Remove "Sending..."
+            self.chat_history.configure(state="disabled")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to get response: {e}")
+            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+            self.chat_history.configure(state="normal")
+            self.chat_history.delete("end-2l", "end-1c") # Remove "Sending..."
+            self.chat_history.configure(state="disabled")
+        finally:
+            self.input_box.delete("1.0", tk.END) # Ensure input box clears
+            self.input_box.configure(state="normal")
+            self.input_box.focus_set()
 
+        return "break"
+
+    def history_up(self, event=None):
+        if self.message_history:
+            if self.history_index > 0:
+                self.history_index -= 1
+            self.input_box.delete("1.0", tk.END)
+            self.input_box.insert("1.0", self.message_history[self.history_index])
+        return "break"
+
+    def history_down(self, event=None):
+        if self.message_history:
+            if self.history_index < len(self.message_history) - 1:
+                self.history_index += 1
+                self.input_box.delete("1.0", tk.END)
+                self.input_box.insert("1.0", self.message_history[self.history_index])
+            elif self.history_index == len(self.message_history) - 1: # If at the last item, clear input
+                self.history_index = len(self.message_history)
+                self.input_box.delete("1.0", tk.END)
         return "break"
 
 if __name__ == "__main__":
