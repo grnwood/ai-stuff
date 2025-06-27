@@ -8,6 +8,7 @@ import sqlite3
 from markdown import markdown
 from html.parser import HTMLParser
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 
@@ -15,13 +16,25 @@ API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000/chat")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 DB_PATH = "chat_sessions.db"
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def get_available_models():
+    try:
+        models = client.models.list()
+        available_models = sorted([model.id for model in models.data if "gpt" in model.id]) # Filter for GPT models and sort
+        return available_models
+    except Exception as e:
+        print(f"Error fetching models: {e}")
+        return ["gpt-3.5-turbo"] # Fallback to a default model
+
 # --- Database ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL
+                    name TEXT UNIQUE NOT NULL,
+                    model TEXT DEFAULT 'gpt-3.5-turbo'
                 )''')
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     session_id INTEGER,
@@ -42,19 +55,26 @@ def init_db():
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name FROM sessions")
+    c.execute("SELECT id, name, model FROM sessions")
     sessions = c.fetchall()
     conn.close()
     return sessions
 
-def create_session(name):
+def create_session(name, model='gpt-3.5-turbo'):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT INTO sessions (name) VALUES (?)", (name,))
+    c.execute("INSERT INTO sessions (name, model) VALUES (?, ?)", (name, model))
     conn.commit()
     session_id = c.lastrowid
     conn.close()
     return session_id
+
+def update_session_model(session_id, model):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET model = ? WHERE id = ?", (model, session_id))
+    conn.commit()
+    conn.close()
 
 def get_messages(session_id):
     conn = sqlite3.connect(DB_PATH)
@@ -110,7 +130,7 @@ def delete_session_and_messages(session_id):
     conn.close()
 
 # --- API ---
-def send_to_api(session_name, messages):
+def send_to_api(session_name, messages, model, chat_history_widget, current_session_id):
     ai_content = messages[-1]['content']
     prompt_content = ""
     system_content = None
@@ -122,20 +142,53 @@ def send_to_api(session_name, messages):
             prompt_content += f"{msg['role'].title()}: {msg['content']}\n\n"
 
     payload = {
-        "model": "gpt-3.5-turbo", # Default model, can be made configurable later
+        "model": model,
         "prompt": prompt_content.strip(),
         "ai": ai_content,
         "system": system_content,
         "session_id": session_name,
-        "stream": False
+        "stream": True  # Enable streaming
     }
     headers = {
         "Content-Type": "application/json",
         "x-api-secret": API_SECRET
     }
-    resp = requests.post(API_URL, json=payload, headers=headers)
-    resp.raise_for_status()
-    return resp.json()['choices'][0]['message']['content']
+
+    assistant_full_reply = ""
+    chat_history_widget.configure(state="normal")
+    chat_history_widget.insert(tk.END, "Assistant:\n", ("assistant_tag")) # Start assistant message
+    chat_history_widget.configure(state="disabled")
+    chat_history_widget.see(tk.END)
+    chat_history_widget.update_idletasks()
+
+    with requests.post(API_URL, json=payload, headers=headers, stream=True) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.startswith("data: "):
+                    json_data = decoded_line[len("data: "):]
+                    if json_data == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(json_data)
+                        if 'choices' in data and len(data['choices']) > 0:
+                            delta = data['choices'][0]['delta']
+                            if 'content' in delta:
+                                content_chunk = delta['content']
+                                assistant_full_reply += content_chunk
+                                chat_history_widget.configure(state="normal")
+                                chat_history_widget.insert(tk.END, content_chunk)
+                                chat_history_widget.configure(state="disabled")
+                                chat_history_widget.see(tk.END)
+                                chat_history_widget.update_idletasks()
+                    except json.JSONDecodeError:
+                        print(f"Skipping non-JSON line: {decoded_line}")
+    
+    # Save the complete assistant reply after streaming is done
+    save_message(current_session_id, "assistant", assistant_full_reply)
+    return assistant_full_reply
+
 
 # --- Markdown to Plaintext Converter ---
 class HTMLToText(HTMLParser):
@@ -170,6 +223,11 @@ class ChatApp(tk.Tk):
         self.history_index = -1
         self.build_gui()
         self.load_sessions()
+
+    def on_model_selected(self, event):
+        if self.session_id:
+            selected_model = self.model_var.get()
+            update_session_model(self.session_id, selected_model)
 
     def show_session_context_menu(self, event):
         try:
@@ -220,9 +278,20 @@ class ChatApp(tk.Tk):
         self.left_frame = ttk.Frame(self)
         self.left_frame.grid(row=0, column=0, sticky="ns")
         self.left_frame.columnconfigure(0, weight=1)
+        self.left_frame.rowconfigure(2, weight=1) # Give weight to the row containing the session list
+
+        # Model selection dropdown
+        self.model_label = ttk.Label(self.left_frame, text="Select Model:")
+        self.model_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.model_var = tk.StringVar()
+        self.model_dropdown = ttk.Combobox(self.left_frame, textvariable=self.model_var, state="readonly")
+        self.model_dropdown.grid(row=1, column=0, sticky="ew", padx=5, pady=2)
+        self.model_dropdown['values'] = get_available_models()
+        self.model_dropdown.set("gpt-3.5-turbo") # Default value
+        self.model_dropdown.bind('<<ComboboxSelected>>', self.on_model_selected) # Bind model selection event
 
         self.session_list = tk.Listbox(self.left_frame)
-        self.session_list.grid(row=0, column=0, sticky="nsew")
+        self.session_list.grid(row=2, column=0, sticky="nsew")
         self.session_list.bind('<<ListboxSelect>>', self.select_session)
         self.session_list.bind('<Button-3>', self.show_session_context_menu)
 
@@ -231,13 +300,13 @@ class ChatApp(tk.Tk):
         self.session_context_menu.add_command(label="Delete", command=self.delete_session)
 
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
-        self.new_button.grid(row=1, column=0, sticky="ew")
+        self.new_button.grid(row=3, column=0, sticky="ew")
 
         self.export_button = ttk.Button(self.left_frame, text="Export Chat", command=self.export_chat)
-        self.export_button.grid(row=2, column=0, sticky="ew")
+        self.export_button.grid(row=4, column=0, sticky="ew")
 
         self.import_button = ttk.Button(self.left_frame, text="Import Chat", command=self.import_chat)
-        self.import_button.grid(row=3, column=0, sticky="ew")
+        self.import_button.grid(row=5, column=0, sticky="ew")
 
         # --- Main Chat Area ---
         self.main_frame = ttk.Frame(self)
@@ -273,7 +342,7 @@ class ChatApp(tk.Tk):
 
         file_path = filedialog.asksaveasfilename(
             defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")],
             initialfile=f"{self.session_name.replace(' ', '_')}_chat.json"
         )
 
@@ -287,7 +356,7 @@ class ChatApp(tk.Tk):
 
     def import_chat(self):
         file_path = filedialog.askopenfilename(
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")]
         )
 
         if file_path:
@@ -311,7 +380,7 @@ class ChatApp(tk.Tk):
                 self.session_list.selection_clear(0, tk.END)
                 # Find the index of the newly created session and select it
                 sessions = get_sessions()
-                for i, (_id, name) in enumerate(sessions):
+                for i, (_id, name, model) in enumerate(sessions): # Added model to tuple unpacking
                     if _id == session_id:
                         self.session_list.selection_set(i)
                         self.session_list.event_generate('<<ListboxSelect>>')
@@ -329,7 +398,7 @@ class ChatApp(tk.Tk):
     def load_sessions(self):
         self.session_list.delete(0, tk.END)
         sessions = get_sessions()
-        for _id, name in sessions:
+        for _id, name, model in sessions: # Added model to tuple unpacking
             self.session_list.insert(tk.END, name)
 
         if sessions:
@@ -343,9 +412,10 @@ class ChatApp(tk.Tk):
     def select_session(self, event):
         try:
             index = self.session_list.curselection()[0]
-            session_name = self.session_list.get(index)
+            _id, session_name, model = get_sessions()[index] # Get model along with id and name
             self.session_name = session_name
-            self.session_id = self.get_session_id_by_name(session_name)
+            self.session_id = _id
+            self.model_var.set(model) # Set the dropdown to the session's model
             self.load_chat_history()
             self.message_history = get_input_history(self.session_id)
             self.history_index = len(self.message_history)
@@ -353,19 +423,25 @@ class ChatApp(tk.Tk):
             return
 
     def get_session_id_by_name(self, name):
-        for _id, s_name in get_sessions():
+        # This function needs to be updated to fetch model as well if it's used to set model_var
+        for _id, s_name, model in get_sessions(): # Added model to tuple unpacking
             if s_name == name:
                 return _id
         return None
 
     def new_session(self):
         name = f"Session {len(get_sessions()) + 1}"
-        session_id = create_session(name)
+        selected_model = self.model_var.get() if self.model_var.get() else "gpt-3.5-turbo" # Use current selection or default
+        session_id = create_session(name, selected_model)
         self.load_sessions()
         self.session_list.selection_clear(0, tk.END)
-        self.session_list.selection_set(tk.END)
-        self.session_name = name
-        self.session_id = session_id
+        # Find the index of the newly created session and select it
+        sessions = get_sessions()
+        for i, (_id, s_name, model) in enumerate(sessions): # Added model to tuple unpacking
+            if _id == session_id:
+                self.session_list.selection_set(i)
+                self.session_list.event_generate('<<ListboxSelect>>')
+                break
         self.chat_history.configure(state="normal")
         self.chat_history.delete("1.0", tk.END)
         self.chat_history.configure(state="disabled")
@@ -400,9 +476,9 @@ class ChatApp(tk.Tk):
         self.update_idletasks() # Update GUI immediately
 
         try:
-            assistant_reply = send_to_api(self.session_name, message_blocks)
-            save_message(self.session_id, "assistant", assistant_reply)
-            self.load_chat_history()
+            # Pass chat_history widget and session_id for real-time updates
+            send_to_api(self.session_name, message_blocks, self.model_var.get(), self.chat_history, self.session_id)
+            self.load_chat_history() # Reload history to ensure final state is saved and displayed
         except requests.exceptions.RequestException as e:
             messagebox.showerror("Network Error", f"Could not connect to the server or API: {e}")
             self.chat_history.configure(state="normal")
@@ -442,4 +518,3 @@ class ChatApp(tk.Tk):
 if __name__ == "__main__":
     app = ChatApp()
     app.mainloop()
-
