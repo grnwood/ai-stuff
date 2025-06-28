@@ -340,6 +340,17 @@ class ChatApp(tk.Tk):
             messagebox.showinfo("Export Chat", "Current session has no messages to export.")
             return
 
+        # Get the current session's model
+        current_session_info = None
+        for _id, name, model in get_sessions():
+            if _id == self.session_id:
+                current_session_info = {"model": model, "messages": messages}
+                break
+        
+        if not current_session_info:
+            messagebox.showerror("Export Error", "Could not retrieve current session details.")
+            return
+
         file_path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.* ")],
@@ -349,7 +360,7 @@ class ChatApp(tk.Tk):
         if file_path:
             try:
                 with open(file_path, 'w') as f:
-                    json.dump(messages, f, indent=4)
+                    json.dump(current_session_info, f, indent=4)
                 messagebox.showinfo("Export Chat", "Chat exported successfully!")
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to export chat: {e}")
@@ -362,17 +373,25 @@ class ChatApp(tk.Tk):
         if file_path:
             try:
                 with open(file_path, 'r') as f:
-                    imported_messages = json.load(f)
+                    imported_data = json.load(f)
 
-                if not isinstance(imported_messages, list):
-                    raise ValueError("Invalid JSON format. Expected a list of messages.")
+                imported_model = "gpt-3.5-turbo"
+                imported_messages = []
+
+                if isinstance(imported_data, dict) and "model" in imported_data and "messages" in imported_data:
+                    imported_model = imported_data["model"]
+                    imported_messages = imported_data["messages"]
+                elif isinstance(imported_data, list):
+                    imported_messages = imported_data
+                else:
+                    raise ValueError("Invalid JSON format. Expected a list of messages or a dictionary with 'model' and 'messages'.")
 
                 new_session_name = tk.simpledialog.askstring("Import Chat", "Enter a name for the new session:",
                                                               initialvalue=f"Imported Chat {len(get_sessions()) + 1}")
                 if not new_session_name:
                     return
 
-                session_id = create_session(new_session_name)
+                session_id = create_session(new_session_name, imported_model) # Pass imported model
                 for role, content in imported_messages:
                     save_message(session_id, role, content)
 
@@ -380,11 +399,17 @@ class ChatApp(tk.Tk):
                 self.session_list.selection_clear(0, tk.END)
                 # Find the index of the newly created session and select it
                 sessions = get_sessions()
-                for i, (_id, name, model) in enumerate(sessions): # Added model to tuple unpacking
+                for i, (_id, name, model) in enumerate(sessions):
                     if _id == session_id:
                         self.session_list.selection_set(i)
                         self.session_list.event_generate('<<ListboxSelect>>')
                         break
+
+                # Set the model dropdown after the session is loaded and selected
+                if imported_model in get_available_models():
+                    self.model_var.set(imported_model)
+                else:
+                    self.model_var.set("gpt-3.5-turbo") # Default if imported model is not available
 
                 messagebox.showinfo("Import Chat", "Chat imported successfully!")
 
@@ -457,11 +482,17 @@ class ChatApp(tk.Tk):
 
     def send_message(self, event=None):
         content = self.input_box.get("1.0", tk.END).strip()
+
+        # Clear input box immediately
+        self.input_box.delete("1.0", tk.END)
+        self.update_idletasks() # Update GUI immediately
+
         if not content or not self.session_id:
             return "break"
 
         save_message(self.session_id, "user", content)
         save_input_history(self.session_id, content) # Save to input history
+        self.selection_clear()
         self.message_history = get_input_history(self.session_id) # Reload history for current session
         self.history_index = len(self.message_history) # Reset index to end after sending
 
@@ -473,7 +504,7 @@ class ChatApp(tk.Tk):
         self.chat_history.insert(tk.END, "\nSending...\n", ("sending_tag"))
         self.chat_history.see(tk.END)
         self.chat_history.configure(state="disabled")
-        self.update_idletasks() # Update GUI immediately
+        self.update_idletasks() # Update GUI immediately  
 
         try:
             # Pass chat_history widget and session_id for real-time updates
@@ -490,7 +521,6 @@ class ChatApp(tk.Tk):
             self.chat_history.delete("end-2l", "end-1c") # Remove "Sending..."
             self.chat_history.configure(state="disabled")
         finally:
-            self.input_box.delete("1.0", tk.END) # Ensure input box clears
             self.input_box.configure(state="normal")
             self.input_box.focus_set()
 
