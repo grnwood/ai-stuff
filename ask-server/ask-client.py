@@ -12,6 +12,7 @@ from tkinter import font
 
 load_dotenv()
 
+APP_NAME="SlipStreamAI"
 API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 DB_PATH = "chat_sessions.db"
@@ -34,9 +35,12 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
                     model TEXT DEFAULT 'gpt-3.5-turbo',
-                    system_prompt TEXT
+                    system_prompt TEXT,
+                    parent_id INTEGER,
+                    type TEXT DEFAULT 'chat',
+                    FOREIGN KEY(parent_id) REFERENCES sessions(id)
                 )''')
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     session_id INTEGER,
@@ -76,15 +80,15 @@ def save_setting(key, value):
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, model, system_prompt FROM sessions ORDER BY id")
+    c.execute("SELECT id, name, model, system_prompt, parent_id, type FROM sessions ORDER BY id")
     sessions = c.fetchall()
     conn.close()
     return sessions
 
-def create_session(name, model='gpt-3.5-turbo', system_prompt=''):
+def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT INTO sessions (name, model, system_prompt) VALUES (?, ?, ?)", (name, model, system_prompt))
+    c.execute("INSERT INTO sessions (name, model, system_prompt, type, parent_id) VALUES (?, ?, ?, ?, ?)", (name, model, system_prompt, type, parent_id))
     conn.commit()
     session_id = c.lastrowid
     conn.close()
@@ -280,7 +284,7 @@ def create_tooltip(widget, text_func):
 class ChatApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Ask Proxy GUI")
+        self.title("SlipstreamAI")
         self.geometry("1000x600")
 
         init_db()
@@ -305,6 +309,8 @@ class ChatApp(tk.Tk):
         self.bind("<Control-f>", self.find_dialog)
         self.search_matches = []
         self.current_match_index = -1
+        self.drag_item = None
+        self.current_input_buffer = ""
 
     def on_model_selected(self, event):
         if self.session_id:
@@ -326,14 +332,74 @@ class ChatApp(tk.Tk):
             self.last_hovered_index = -1
             self.session_tooltip.hidetip()
 
+    def on_button_press(self, event):
+        self.drag_item = self.session_tree.identify_row(event.y)
+
+    def on_button_release(self, event):
+        if not self.drag_item:
+            return
+            
+        item = self.session_tree.identify_row(event.y)
+        
+        if item and item != self.drag_item:
+            if self.session_tree.item(item, "values")[1] == 'folder':
+                self.session_tree.move(self.drag_item, item, 'end')
+                drag_id = self.session_tree.item(self.drag_item, "values")[0]
+                target_id = self.session_tree.item(item, "values")[0]
+                self.update_item_parent(drag_id, target_id)
+            else:
+                parent = self.session_tree.parent(item)
+                index = self.session_tree.index(item)
+                self.session_tree.move(self.drag_item, parent, index)
+                drag_id = self.session_tree.item(self.drag_item, "values")[0]
+                parent_id = self.session_tree.item(parent, "values")[0] if parent else None
+                self.update_item_parent(drag_id, parent_id)
+        elif not item:
+            self.session_tree.move(self.drag_item, "", "end")
+            drag_id = self.session_tree.item(self.drag_item, "values")[0]
+            self.update_item_parent(drag_id, None)
+
+        self.drag_item = None
+        self.clear_drop_indicator()
+
+    def move_item(self, event):
+        if not self.drag_item:
+            return
+        
+        self.clear_drop_indicator()
+        item = self.session_tree.identify_row(event.y)
+        
+        if item:
+            if self.session_tree.item(item, "values")[1] == 'folder':
+                self.session_tree.item(item, tags="drop_target")
+            else:
+                self.session_tree.selection_set(item)
+
+    def clear_drop_indicator(self):
+        for item in self.session_tree.get_children(""):
+            self.session_tree.item(item, tags="")
+            self.clear_tags_recursively(item)
+
+    def clear_tags_recursively(self, item):
+        for child in self.session_tree.get_children(item):
+            self.session_tree.item(child, tags="")
+            self.clear_tags_recursively(child)
+
+    def update_item_parent(self, item_id, parent_id):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE sessions SET parent_id = ? WHERE id = ?", (parent_id, item_id))
+        conn.commit()
+        conn.close()
+
     def hide_session_tooltip(self, event=None):
         self.session_tooltip.hidetip()
         self.last_hovered_index = -1
     
     def show_session_context_menu(self, event):
         try:
-            self.session_list.selection_clear(0, tk.END)
-            self.session_list.selection_set(self.session_list.nearest(event.y))
+            self.session_tree.selection_clear()
+            self.session_tree.selection_set(self.session_tree.identify_row(event.y))
             self.session_context_menu.post(event.x_root, event.y_root)
         finally:
             self.session_context_menu.grab_release()
@@ -368,13 +434,21 @@ class ChatApp(tk.Tk):
                     self.chat_history.configure(state="normal")
                     self.chat_history.delete("1.0", tk.END)
                     self.chat_history.configure(state="disabled")
+                    self.update_input_widgets_state()
         except IndexError:
             pass
 
     def build_gui(self):
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        def build_gui(self):
+            self.grid_rowconfigure(0, weight=1)
+            self.grid_columnconfigure(0, weight=1)
+
         # Main PanedWindow (Left and Right Panels)
         self.main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        self.main_paned_window.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.main_paned_window.grid(row=0, column=0, sticky="nsew", pady=10)
 
         # Left PanedWindow (Session List and Main Chat Area)
         self.left_paned_window = ttk.PanedWindow(self.main_paned_window, orient=tk.HORIZONTAL)
@@ -395,17 +469,16 @@ class ChatApp(tk.Tk):
         self.model_dropdown.set("gpt-3.5-turbo")
         self.model_dropdown.bind('<<ComboboxSelected>>', self.on_model_selected)
 
-        self.session_list = tk.Listbox(self.left_frame)
-        self.session_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
-        self.session_list.bind('<<ListboxSelect>>', self.select_session)
-        self.session_list.bind('<Button-3>', self.show_session_context_menu)
-        self.session_list.bind('<Motion>', self.on_session_list_motion)
-        self.session_list.bind('<Leave>', self.hide_session_tooltip)
+        self.session_tree = ttk.Treeview(self.left_frame, show="tree")
+        self.session_tree.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        self.session_tree.bind('<<TreeviewSelect>>', self.select_session)
+        self.session_tree.bind('<Button-3>', self.show_session_context_menu)
+        self.session_tree.bind("<B1-Motion>", self.move_item)
+        self.session_tree.bind("<ButtonPress-1>", self.on_button_press)
+        self.session_tree.bind("<ButtonRelease-1>", self.on_button_release)
 
-        self.session_tooltip = ToolTip(self.session_list)
-        self.last_hovered_index = -1
-
-        self.session_context_menu = tk.Menu(self.session_list, tearoff=0)
+        self.session_context_menu = tk.Menu(self.session_tree, tearoff=0)
+        self.session_context_menu.add_command(label="New Folder", command=self.new_folder)
         self.session_context_menu.add_command(label="Rename", command=self.rename_session)
         self.session_context_menu.add_command(label="Delete", command=self.delete_session)
 
@@ -492,7 +565,7 @@ class ChatApp(tk.Tk):
 
         # --- Status Bar ---
         self.status_bar = ttk.Label(self, text="", anchor=tk.W)
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar.grid(row=1, column=0, sticky="ew")
 
     def toggle_system_prompt(self):
         if self.system_prompt_text.winfo_ismapped():
@@ -528,7 +601,7 @@ class ChatApp(tk.Tk):
             # Left panel
             self.left_frame.configure(style="Dark.TFrame")
             self.model_label.configure(style="Dark.TLabel")
-            self.session_list.configure(bg="#3c3f41", fg="white", selectbackground="#4f5254", selectforeground="white")
+            self.session_tree.configure(style="Dark.Treeview")
             self.new_button.configure(style="Dark.TButton")
             self.export_button.configure(style="Dark.TButton")
             self.import_button.configure(style="Dark.TButton")
@@ -547,7 +620,9 @@ class ChatApp(tk.Tk):
             s.configure("Dark.TFrame", background="#2b2b2b")
             s.configure("Dark.TLabel", background="#2b2b2b", foreground="white")
             s.configure("Dark.TButton", background="#4f5254", foreground="white")
-            s.map("Dark.TButton", background=[('active', '#6f7274')])
+            s.map("Dark.TButton", background=[('active', '#6f7274'), ('!disabled', '#4f5254')], foreground=[('!disabled', 'white')])
+            s.configure("Dark.Treeview", background="#3c3f41", foreground="white", fieldbackground="#3c3f41")
+            s.map("Dark.Treeview", background=[('selected', '#4f5254')], foreground=[('selected', 'white')])
             if os.name == 'nt':
                 s.layout("Dark.TButton", [
                     ("Button.border", {"children":
@@ -561,7 +636,7 @@ class ChatApp(tk.Tk):
             # Left panel
             self.left_frame.configure(style="TFrame")
             self.model_label.configure(style="TLabel")
-            self.session_list.configure(bg="white", fg="black", selectbackground="#0078d7", selectforeground="white")
+            self.session_tree.configure(style="Treeview")
             self.new_button.configure(style="TButton")
             self.export_button.configure(style="TButton")
             self.import_button.configure(style="TButton")
@@ -576,6 +651,8 @@ class ChatApp(tk.Tk):
             self.right_frame.configure(style="TFrame")
             self.system_prompt_label.configure(style="TLabel")
             self.system_prompt_text.configure(bg="white", fg="black", insertbackground="black")
+            s.configure("Treeview", background="white", foreground="black", fieldbackground="white")
+            s.map("Treeview", background=[('selected', '#0078d7')], foreground=[('selected', 'white')])
 
     def apply_font(self):
         font_name = self.chat_font.get()
@@ -596,7 +673,7 @@ class ChatApp(tk.Tk):
         style.configure("TLabel", font=(None, ui_font_size))
         style.configure("TButton", font=(None, ui_font_size))
         style.configure("TCombobox", font=(None, ui_font_size))
-        self.session_list.configure(font=(None, ui_font_size))
+        style.configure("Treeview", font=(None, ui_font_size), rowheight=int(ui_font_size * 2.5))
         self.system_prompt_text.configure(font=(None, ui_font_size))
 
     def open_settings(self):
@@ -692,7 +769,7 @@ class ChatApp(tk.Tk):
         
         # Get the current session's details
         current_session_info = None
-        for _id, name, model, system_prompt in get_sessions():
+        for _id, name, model, system_prompt, parent_id, type in get_sessions():
             if _id == self.session_id:
                 current_session_info = {
                     "model": model, 
@@ -755,10 +832,10 @@ class ChatApp(tk.Tk):
                 self.session_list.selection_clear(0, tk.END)
                 
                 sessions = get_sessions()
-                for i, (_id, name, model, system_prompt) in enumerate(sessions):
+                for i, (_id, name, model, system_prompt, parent_id, type) in enumerate(sessions):
                     if _id == session_id:
-                        self.session_list.selection_set(i)
-                        self.session_list.event_generate('<<ListboxSelect>>')
+                        self.session_tree.selection_set(i)
+                        self.session_tree.focus(i)
                         break
 
                 if imported_model in get_available_models():
@@ -775,64 +852,117 @@ class ChatApp(tk.Tk):
             except Exception as e:
                 messagebox.showerror("Import Error", f"An unexpected error occurred: {e}")
 
-    def load_sessions(self, set_selection=True):
-        self.session_list.delete(0, tk.END)
-        sessions = get_sessions()
-        for _id, name, model, empty in sessions: # Added model to tuple unpacking
-            self.session_list.insert(tk.END, name)
+    def new_folder(self):
+        name = tk.simpledialog.askstring("New Folder", "Enter folder name:")
+        if name:
+            create_session(name, type='folder')
+            self.load_sessions()
 
-        if sessions:
-            if set_selection:
-                # Select the first session by default if any exist
-                self.session_list.selection_set(0)
-                self.session_list.event_generate('<<ListboxSelect>>')
-        else:
-            # Create a new session if no sessions exist
-            self.new_session()
+    def load_sessions(self, set_selection=True):
+        for i in self.session_tree.get_children():
+            self.session_tree.delete(i)
+        
+        sessions = get_sessions()
+        session_map = {s[0]: s for s in sessions}
+        
+        def add_to_tree(parent_id, parent_node=""):
+            for _id, name, model, system_prompt, s_parent_id, type in sessions:
+                if s_parent_id == parent_id:
+                    node = self.session_tree.insert(parent_node, "end", text=name, values=(_id, type))
+                    if type == 'folder':
+                        add_to_tree(_id, node)
+
+        add_to_tree(None)
+
+        if sessions and set_selection:
+            first_item = self.session_tree.get_children()[0]
+            self.session_tree.selection_set(first_item)
+            self.session_tree.focus(first_item)
 
     def select_session(self, event):
-        try:
-            index = self.session_list.curselection()[0]
-            _id, session_name, model, system_prompt = get_sessions()[index]
-            self.session_name = session_name
-            self.session_id = _id
-            self.title(f"Ask Proxy GUI - {self.session_name}")
-            self.model_var.set(model)
-            
-            # Load system prompt
-            self._system_prompt_updating = True # Set flag to prevent saving on load
-            self.system_prompt_text.delete("1.0", tk.END)
-            if system_prompt:
-                self.system_prompt_text.insert("1.0", system_prompt)
-            self.system_prompt_text.edit_modified(False) # Reset modified flag
-            self._system_prompt_updating = False
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        selected_item = selection[0]
+        _id, type = self.session_tree.item(selected_item, "values")
+        _id = int(_id)
 
-            self.load_chat_history()
-            self.message_history = get_input_history(self.session_id)
-            self.history_index = len(self.message_history)
-        except IndexError:
-            self.title("Ask Proxy GUI")
+        if type == 'folder':
+            self.session_id = None
+            self.session_name = None
+            self.title("SlipstreamAI Client")
+            self.chat_history.configure(state="normal")
+            self.chat_history.delete("1.0", tk.END)
+            self.chat_history.configure(state="disabled")
+            self.update_input_widgets_state()
+            return
+
+        for sid, name, model, system_prompt, parent_id, stype in get_sessions():
+            if sid == _id:
+                self.session_name = name
+                self.session_id = _id
+                self.title(f"{APP_NAME} - {self.session_name}")
+                self.model_var.set(model)
+                
+                # Load system prompt
+                self._system_prompt_updating = True # Set flag to prevent saving on load
+                self.system_prompt_text.delete("1.0", tk.END)
+                if system_prompt:
+                    self.system_prompt_text.insert("1.0", system_prompt)
+                self.system_prompt_text.edit_modified(False) # Reset modified flag
+                self._system_prompt_updating = False
+
+                self.load_chat_history()
+                self.message_history = get_input_history(self.session_id)
+                self.history_index = len(self.message_history)
+                self.current_input_buffer = ""
+                self.update_input_widgets_state()
+                break
+        else:
+            self.title(f"{APP.NAME}")
+            self.update_input_widgets_state()
             return
 
     def get_session_id_by_name(self, name):
-        # This function needs to be updated to fetch model as well if it's used to set model_var
-        for _id, s_name, model, empty in get_sessions(): # Added model to tuple unpacking
+        for _id, s_name, model, system_prompt, parent_id, type in get_sessions():
             if s_name == name:
                 return _id
         return None
+
+    def find_tree_item_by_id(self, target_id):
+        def search_children(parent_item):
+            for item in self.session_tree.get_children(parent_item):
+                item_values = self.session_tree.item(item, "values")
+                if item_values and int(item_values[0]) == target_id:
+                    return item
+                found = search_children(item)
+                if found:
+                    return found
+            return None
+        return search_children("")
+
+    def update_input_widgets_state(self):
+        if self.session_id is None:
+            self.input_box.configure(state="disabled")
+            self.send_button.configure(state="disabled")
+            self.status_bar.config(text="Please select or create a chat session.")
+        else:
+            self.input_box.configure(state="normal")
+            self.send_button.configure(state="normal")
+            self.status_bar.config(text="")
 
     def new_session(self):
         name = f"Session {len(get_sessions()) + 1}"
         default_model = get_setting("default_model", "gpt-3.5-turbo")
         session_id = create_session(name, default_model)
         self.load_sessions()
-        self.session_list.selection_clear(0, tk.END)
+        self.session_tree.selection_clear()
         # Find the index of the newly created session and select it
         sessions = get_sessions()
-        for i, (_id, s_name, model, system_prompt) in enumerate(sessions):
+        for i, (_id, s_name, model, system_prompt, parent_id, type) in enumerate(sessions):
             if _id == session_id:
-                self.session_list.selection_set(i)
-                self.session_list.event_generate('<<ListboxSelect>>')
+                self.session_tree.selection_set(i)
+                self.session_tree.focus(i)
                 break
         self.chat_history.delete("1.0", tk.END)
 
@@ -975,7 +1105,8 @@ class ChatApp(tk.Tk):
         save_input_history(self.session_id, content)
         self.message_history = get_input_history(self.session_id)
         self.history_index = len(self.message_history)
-
+        self.current_input_buffer = ""
+        
         messages = get_messages(self.session_id)
         message_blocks = [{"role": role, "content": content} for role, content in messages]
         
@@ -1002,34 +1133,42 @@ class ChatApp(tk.Tk):
             self.input_box.configure(state="normal")
             self.input_box.focus_set()
             
-            sessions = get_sessions()
-            for i, (_id, name, model, system_prompt) in enumerate(sessions):
-                if _id == active_session_id:
-                    self.session_list.selection_set(i)
-                    self.session_list.activate(i)
-                    self.session_list.see(i)
-                    break
+            item_to_select = self.find_tree_item_by_id(active_session_id)
+            if item_to_select:
+                self.session_tree.selection_set(item_to_select)
+                self.session_tree.focus(item_to_select)
+
             self.load_chat_history()
 
         return "break"
 
     def history_up(self, event=None):
-        if self.message_history:
-            if self.history_index > 0:
-                self.history_index -= 1
+        if not self.message_history:
+            return "break"
+            
+        if self.history_index == len(self.message_history):
+            self.current_input_buffer = self.input_box.get("1.0", tk.END)
+
+        if self.history_index > 0:
+            self.history_index -= 1
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", self.message_history[self.history_index])
+        
         return "break"
 
     def history_down(self, event=None):
-        if self.message_history:
-            if self.history_index < len(self.message_history) - 1:
-                self.history_index += 1
-                self.input_box.delete("1.0", tk.END)
-                self.input_box.insert("1.0", self.message_history[self.history_index])
-            elif self.history_index == len(self.message_history) - 1: # If at the last item, clear input
-                self.history_index = len(self.message_history)
-                self.input_box.delete("1.0", tk.END)
+        if not self.message_history:
+            return "break"
+
+        if self.history_index < len(self.message_history) -1:
+            self.history_index += 1
+            self.input_box.delete("1.0", tk.END)
+            self.input_box.insert("1.0", self.message_history[self.history_index])
+        elif self.history_index == len(self.message_history) -1:
+            self.history_index += 1
+            self.input_box.delete("1.0", tk.END)
+            self.input_box.insert("1.0", self.current_input_buffer)
+
         return "break"
 
     def increase_font_size(self, event=None):
