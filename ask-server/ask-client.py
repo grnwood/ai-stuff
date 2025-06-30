@@ -295,6 +295,10 @@ class ChatApp(tk.Tk):
         self.chat_font_size = tk.IntVar(value=get_setting("chat_font_size", 10))
         self.ui_font_size = tk.IntVar(value=get_setting("ui_font_size", 12))
 
+        self.chat_icon = tk.PhotoImage(file="/home/grnwood/code/ai-stuff/ask-server/img/comment-alt.png")
+        self.folder_icon = tk.PhotoImage(file="/home/grnwood/code/ai-stuff/ask-server/img/folder-open.png")
+        self.space = tk.PhotoImage(width=5, height=1)
+
         self.build_gui()
         self.apply_theme()
         self.apply_font()
@@ -966,7 +970,7 @@ class ChatApp(tk.Tk):
         if name:
             session_id = create_session(name, type='folder', parent_id=parent_id)
             parent_node = self.find_tree_item_by_id(parent_id) if parent_id else ""
-            self.session_tree.insert(parent_node, "end", text=name, values=(session_id, 'folder'))
+            self.session_tree.insert(parent_node, "end", text=name, values=(session_id, 'folder'), image=self.folder_icon, compound=tk.LEFT)
 
     def load_sessions(self, open_folders=None, set_selection=True):
         if open_folders is None:
@@ -981,8 +985,8 @@ class ChatApp(tk.Tk):
         def add_to_tree(parent_id, parent_node=""):
             for _id, name, model, system_prompt, s_parent_id, type in sessions:
                 if s_parent_id == parent_id:
-                    is_open = _id in open_folders
-                    node = self.session_tree.insert(parent_node, "end", text=name, values=(_id, type), open=is_open)
+                    icon = self.chat_icon if type == 'chat' else self.folder_icon
+                    node = self.session_tree.insert(parent_node, "end", text=name, values=(_id, type), image=icon)
                     if type == 'folder':
                         add_to_tree(_id, node)
 
@@ -1079,8 +1083,8 @@ class ChatApp(tk.Tk):
 
         session_id = create_session(name, default_model, parent_id=parent_id)
         
-        parent_node = self.find_tree_item_by_id(int(parent_id)) if parent_id else ""
-        new_item = self.session_tree.insert(parent_node, "end", text=name, values=(session_id, 'chat'))
+        parent_node = self.find_tree_item_by_id(parent_id) if parent_id else ""
+        new_item = self.session_tree.insert(parent_node, "end", text=name, values=(session_id, 'chat'), image=self.chat_icon)
         self.session_tree.selection_set(new_item)
         self.session_tree.focus(new_item)
         self.select_session(None) # Manually trigger selection logic
