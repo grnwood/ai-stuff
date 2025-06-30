@@ -238,9 +238,6 @@ def markdown_to_text(md):
     parser.feed(html)
     return parser.get_text()
 
-LEPRECHAUN_ICON_B64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAABmJLR0QA/wD/AP+gvaeTAAAFFklEQVRoge2ZWWxUVRjHnf/O3jIznbZ0m5aaaYFKKZBaQwutBmlQSRpjwgPGYMUQibyw+GLUBBLjk0iCEpVIQIlGMJIYcUlqUQyrEhdKSwttodBtCtOWlk5nvXN9GB0ytKV37m0Fk/6eZs73nfP9//cs90wLM8www/8aIZHk/Ycv1QoyL4NQBKROk6Z/EE6tXzu3crIsvdLhDhxqfRdZ3qZNVCLIy5VkiUqSPvmy7RGQt2oTND0oMiBLkQ0kuNz+KxQZEAQmXYv3C0V7QIbcyXJEOUy2p46swZ9xjDRiDHqQBR2j5lw89gq605/k1qyF2hXfhdJNnHKvoN3bQlnLZqy+q2NiptAAjtsNzO3ay4B1Mc3527iZUqFG67goWkLjI1OZcRZ7sINljbVx4g1COjZdJTZ9JQYhLdaeevs8yxtrKWvZgjE8pEV3DNUGMsz9FNqusCr7R8x442IWXRGiYELEhEUsGtM31/M9K/6owTZ6WW35GKoNuKzRJ57sSCb5ibUIBmNC/S1BN1UNz2PzXlIrAdBgICfJHfusz3ZhrdmILt0JgE9qJkKAiOzHJ7cAYHDOwramENuaQgzO5GhbeIjy5lcwaFhOqg0k60fjB7KlYV39EuZFVYTkfobDJxmWThGK9ANgqchCTNIjJumxlGfF+iX5u3j4+ntqZag3IMm6cUbTYS5diWlBeUJjPdT7BeaQR5UO1QZu+NMnjJkWLhvT5jvTS2Q0TMQbwnfWHRcT5TC5N4+q0qHawMVb8yeM+SIGwpH4m0eo28vwV20MH2kn1O0d0yf91llVOlQb6BnN5vxAybixb3+5xgdt+Uiy8utTsr9LlQ4NLzL4c6CEY72P4"
-COG_ICON_B64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAHpJREFUOE9jZKAQMFKon4F4CyzFcPSfD38gI6B4dIO8+P+fg4F4M5D/D8r/xf4/A/l/I/x/Zvz/x/A/kP8P8v9D/D8s/A/k/4P8/xD/H8b/B/I/Qfw/yP8f4v8D+f8g/x/E/wfy/0H8/yD//wD5/yD+P8j/BwA5wwtAxwIEAwOOA58JihOfpB3A5sA0gqQA5gU1AAB2tX9dbYsrNQAAAABJRU5ErkJggg=="
-
 class ToolTip:
     def __init__(self, widget):
         self.widget = widget
@@ -303,6 +300,7 @@ class ChatApp(tk.Tk):
         self.apply_font()
         self.apply_ui_font()
         self.load_sessions()
+        self.update_input_widgets_state()
 
         self.bind("<Control-equal>", self.increase_font_size)
         self.bind("<Control-minus>", self.decrease_font_size)
@@ -392,17 +390,43 @@ class ChatApp(tk.Tk):
         conn.commit()
         conn.close()
 
+    def get_open_folders(self, item, open_folders):
+        if self.session_tree.item(item, "open"):
+            item_id = self.session_tree.item(item, "values")[0]
+            open_folders.add(item_id)
+        for child in self.session_tree.get_children(item):
+            self.get_open_folders(child, open_folders)
+
     def hide_session_tooltip(self, event=None):
         self.session_tooltip.hidetip()
         self.last_hovered_index = -1
     
     def show_session_context_menu(self, event):
-        try:
-            self.session_tree.selection_clear()
-            self.session_tree.selection_set(self.session_tree.identify_row(event.y))
-            self.session_context_menu.post(event.x_root, event.y_root)
-        finally:
-            self.session_context_menu.grab_release()
+        item = self.session_tree.identify_row(event.y)
+        if not item:
+            self.whitespace_context_menu.post(event.x_root, event.y_root)
+            return
+        
+        self.session_tree.selection_set(item)
+        item_type = self.session_tree.item(item, "values")[1]
+
+        if item_type == 'folder':
+            self.session_context_menu.entryconfig("New Chat", state="normal")
+        else:
+            self.session_context_menu.entryconfig("New Chat", state="disabled")
+
+        self.session_context_menu.post(event.x_root, event.y_root)
+
+    def new_chat_in_folder(self):
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        
+        selected_item = selection[0]
+        item_type = self.session_tree.item(selected_item, "values")[1]
+        if item_type == 'folder':
+            parent_id = self.session_tree.item(selected_item, "values")[0]
+            self.new_session(parent_id=parent_id)
 
     def rename_session(self):
         try:
@@ -420,23 +444,40 @@ class ChatApp(tk.Tk):
             pass
 
     def delete_session(self):
-        try:
-            index = self.session_list.curselection()[0]
-            session_name = self.session_list.get(index)
-            session_id = self.get_session_id_by_name(session_name)
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        
+        selected_item = selection[0]
+        session_id, type = self.session_tree.item(selected_item, "values")
+        session_id = int(session_id)
+        session_name = self.session_tree.item(selected_item, "text")
 
-            if messagebox.askyesno("Delete Session", f"Are you sure you want to delete session '{session_name}' and all its messages?"):
-                delete_session_and_messages(session_id)
-                self.load_sessions()
-                if self.session_id == session_id:
-                    self.session_id = None
-                    self.session_name = None
-                    self.chat_history.configure(state="normal")
-                    self.chat_history.delete("1.0", tk.END)
-                    self.chat_history.configure(state="disabled")
-                    self.update_input_widgets_state()
-        except IndexError:
-            pass
+        if type == 'folder':
+            # Simple folder deletion: only if it's empty
+            if not self.session_tree.get_children(selected_item):
+                if messagebox.askyesno("Delete Folder", f"Are you sure you want to delete the empty folder '{session_name}'?"):
+                    delete_session_and_messages(session_id)
+                    self.session_tree.delete(selected_item)
+            else:
+                messagebox.showinfo("Delete Folder", "Cannot delete a folder that is not empty.")
+            return
+
+        messages = get_messages(session_id)
+        if not messages: # If the session is empty, delete without confirmation
+            delete_session_and_messages(session_id)
+            self.session_tree.delete(selected_item)
+        elif messagebox.askyesno("Delete Session", f"Are you sure you want to delete session '{session_name}' and all its messages?"):
+            delete_session_and_messages(session_id)
+            self.session_tree.delete(selected_item)
+
+        if self.session_id == session_id:
+            self.session_id = None
+            self.session_name = None
+            self.chat_history.configure(state="normal")
+            self.chat_history.delete("1.0", tk.END)
+            self.chat_history.configure(state="disabled")
+            self.update_input_widgets_state()
 
     def build_gui(self):
         self.grid_rowconfigure(0, weight=1)
@@ -478,9 +519,14 @@ class ChatApp(tk.Tk):
         self.session_tree.bind("<ButtonRelease-1>", self.on_button_release)
 
         self.session_context_menu = tk.Menu(self.session_tree, tearoff=0)
+        self.session_context_menu.add_command(label="New Chat", command=self.new_chat_in_folder)
         self.session_context_menu.add_command(label="New Folder", command=self.new_folder)
         self.session_context_menu.add_command(label="Rename", command=self.rename_session)
         self.session_context_menu.add_command(label="Delete", command=self.delete_session)
+
+        self.whitespace_context_menu = tk.Menu(self.session_tree, tearoff=0)
+        self.whitespace_context_menu.add_command(label="New Chat", command=lambda: self.new_session(parent_id=None))
+        self.whitespace_context_menu.add_command(label="New Folder", command=lambda: self.new_folder(parent_id=None))
 
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
         self.new_button.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 2))
@@ -528,6 +574,63 @@ class ChatApp(tk.Tk):
         self.chat_history_menu = tk.Menu(self.chat_history, tearoff=0)
         self.chat_history_menu.add_command(label="Copy", command=self.copy_chat_selection)
         self.chat_history.bind("<Button-3>", self.show_chat_context_menu)
+
+        self.selection_context_menu = tk.Menu(self.chat_history, tearoff=0)
+        summarize_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        summarize_menu.add_command(label="Summarize this text", command=lambda: self.process_selection("summarize"))
+        summarize_menu.add_command(label="TL;DR version", command=lambda: self.process_selection("tldr"))
+        self.selection_context_menu.add_cascade(label="Summarize", menu=summarize_menu)
+
+        explain_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        explain_menu.add_command(label="Explain this in simpler terms", command=lambda: self.process_selection("explain_simple"))
+        explain_menu.add_command(label="Tell me more about this", command=lambda: self.process_selection("explain_more"))
+        explain_menu.add_command(label="Add more detail/examples", command=lambda: self.process_selection("explain_detail"))
+        self.selection_context_menu.add_cascade(label="Explain or Elaborate", menu=explain_menu)
+
+        rewrite_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        rewrite_menu.add_command(label="Rephrase this", command=lambda: self.process_selection("rewrite_rephrase"))
+        rewrite_menu.add_command(label="Make this more formal", command=lambda: self.process_selection("rewrite_formal"))
+        rewrite_menu.add_command(label="Make this more informal", command=lambda: self.process_selection("rewrite_informal"))
+        rewrite_menu.add_command(label="Make this more professional", command=lambda: self.process_selection("rewrite_professional"))
+        rewrite_menu.add_command(label="Improve grammar or style", command=lambda: self.process_selection("rewrite_improve"))
+        self.selection_context_menu.add_cascade(label="Rewrite", menu=rewrite_menu)
+
+        translate_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        translate_menu.add_command(label="Translate to English", command=lambda: self.process_selection("translate_english"))
+        translate_menu.add_command(label="Detect and translate", command=lambda: self.process_selection("translate_detect"))
+        self.selection_context_menu.add_cascade(label="Translate", menu=translate_menu)
+
+        analyze_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        analyze_menu.add_command(label="Analyze sentiment or tone", command=lambda: self.process_selection("analyze_sentiment"))
+        analyze_menu.add_command(label="Identify assumptions or bias", command=lambda: self.process_selection("analyze_bias"))
+        analyze_menu.add_command(label="Classify the topic", command=lambda: self.process_selection("analyze_topic"))
+        self.selection_context_menu.add_cascade(label="Analyze", menu=analyze_menu)
+
+        ask_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        ask_menu.add_command(label="Generate questions from this text", command=lambda: self.process_selection("ask_generate"))
+        ask_menu.add_command(label="What questions can I ask about this?", command=lambda: self.process_selection("ask_what_questions"))
+        self.selection_context_menu.add_cascade(label="Ask Questions", menu=ask_menu)
+
+        extract_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        extract_menu.add_command(label="Highlight key points", command=lambda: self.process_selection("extract_key_points"))
+        extract_menu.add_command(label="Extract named entities (people, places, dates, etc.)", command=lambda: self.process_selection("extract_entities"))
+        extract_menu.add_command(label="Pull out action items", command=lambda: self.process_selection("extract_action_items"))
+        self.selection_context_menu.add_cascade(label="Extract Info", menu=extract_menu)
+
+        expand_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        expand_menu.add_command(label="Continue writing from here", command=lambda: self.process_selection("expand_continue"))
+        expand_menu.add_command(label="Generate a follow-up paragraph/story/argument", command=lambda: self.process_selection("expand_follow_up"))
+        self.selection_context_menu.add_cascade(label="Expand or Continue", menu=expand_menu)
+
+        define_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        define_menu.add_command(label="Define highlighted term(s)", command=lambda: self.process_selection("define_terms"))
+        define_menu.add_command(label="Provide background or context", command=lambda: self.process_selection("define_context"))
+        self.selection_context_menu.add_cascade(label="Define or Clarify", menu=define_menu)
+
+        respond_menu = tk.Menu(self.selection_context_menu, tearoff=0)
+        respond_menu.add_command(label="Write a reply or response", command=lambda: self.process_selection("respond_reply"))
+        respond_menu.add_command(label="Start a discussion from this", command=lambda: self.process_selection("respond_discuss"))
+        self.selection_context_menu.add_cascade(label="Respond or Interact", menu=respond_menu)
 
         self.input_container_frame = ttk.Frame(self.main_frame)
         self.input_container_frame.grid(row=1, column=0, sticky="ew")
@@ -824,19 +927,25 @@ class ChatApp(tk.Tk):
                 if not new_session_name:
                     return
 
-                session_id = create_session(new_session_name, imported_model, imported_system_prompt)
+                parent_id = None
+                selection = self.session_tree.selection()
+                if selection:
+                    selected_item = selection[0]
+                    item_type = self.session_tree.item(selected_item, "values")[1]
+                    if item_type == 'folder':
+                        parent_id = self.session_tree.item(selected_item, "values")[0]
+
+                session_id = create_session(new_session_name, imported_model, imported_system_prompt, parent_id=parent_id)
                 for role, content in imported_messages:
                     save_message(session_id, role, content)
 
                 self.load_sessions()
-                self.session_list.selection_clear(0, tk.END)
                 
-                sessions = get_sessions()
-                for i, (_id, name, model, system_prompt, parent_id, type) in enumerate(sessions):
-                    if _id == session_id:
-                        self.session_tree.selection_set(i)
-                        self.session_tree.focus(i)
-                        break
+                new_item = self.find_tree_item_by_id(session_id)
+                if new_item:
+                    self.session_tree.selection_set(new_item)
+                    self.session_tree.focus(new_item)
+                    self.select_session(None)
 
                 if imported_model in get_available_models():
                     self.model_var.set(imported_model)
@@ -852,13 +961,17 @@ class ChatApp(tk.Tk):
             except Exception as e:
                 messagebox.showerror("Import Error", f"An unexpected error occurred: {e}")
 
-    def new_folder(self):
+    def new_folder(self, parent_id=None):
         name = tk.simpledialog.askstring("New Folder", "Enter folder name:")
         if name:
-            create_session(name, type='folder')
-            self.load_sessions()
+            session_id = create_session(name, type='folder', parent_id=parent_id)
+            parent_node = self.find_tree_item_by_id(parent_id) if parent_id else ""
+            self.session_tree.insert(parent_node, "end", text=name, values=(session_id, 'folder'))
 
-    def load_sessions(self, set_selection=True):
+    def load_sessions(self, open_folders=None, set_selection=True):
+        if open_folders is None:
+            open_folders = set()
+
         for i in self.session_tree.get_children():
             self.session_tree.delete(i)
         
@@ -868,7 +981,8 @@ class ChatApp(tk.Tk):
         def add_to_tree(parent_id, parent_node=""):
             for _id, name, model, system_prompt, s_parent_id, type in sessions:
                 if s_parent_id == parent_id:
-                    node = self.session_tree.insert(parent_node, "end", text=name, values=(_id, type))
+                    is_open = _id in open_folders
+                    node = self.session_tree.insert(parent_node, "end", text=name, values=(_id, type), open=is_open)
                     if type == 'folder':
                         add_to_tree(_id, node)
 
@@ -951,20 +1065,25 @@ class ChatApp(tk.Tk):
             self.send_button.configure(state="normal")
             self.status_bar.config(text="")
 
-    def new_session(self):
+    def new_session(self, parent_id=None):
         name = f"Session {len(get_sessions()) + 1}"
         default_model = get_setting("default_model", "gpt-3.5-turbo")
-        session_id = create_session(name, default_model)
-        self.load_sessions()
-        self.session_tree.selection_clear()
-        # Find the index of the newly created session and select it
-        sessions = get_sessions()
-        for i, (_id, s_name, model, system_prompt, parent_id, type) in enumerate(sessions):
-            if _id == session_id:
-                self.session_tree.selection_set(i)
-                self.session_tree.focus(i)
-                break
-        self.chat_history.delete("1.0", tk.END)
+        
+        if parent_id is None:
+            selection = self.session_tree.selection()
+            if selection:
+                selected_item = selection[0]
+                item_type = self.session_tree.item(selected_item, "values")[1]
+                if item_type == 'folder':
+                    parent_id = self.session_tree.item(selected_item, "values")[0]
+
+        session_id = create_session(name, default_model, parent_id=parent_id)
+        
+        parent_node = self.find_tree_item_by_id(int(parent_id)) if parent_id else ""
+        new_item = self.session_tree.insert(parent_node, "end", text=name, values=(session_id, 'chat'))
+        self.session_tree.selection_set(new_item)
+        self.session_tree.focus(new_item)
+        self.select_session(None) # Manually trigger selection logic
 
     def show_status_message(self, message, duration=3000):
         self.status_bar.config(text=message)
@@ -1001,9 +1120,130 @@ class ChatApp(tk.Tk):
             print(f"Error copying message: {e}")
 
     def show_chat_context_menu(self, event):
-        # Show context menu only if there is a selection
         if self.chat_history.tag_ranges("sel"):
+            self.selection_context_menu.post(event.x_root, event.y_root)
+        else:
             self.chat_history_menu.post(event.x_root, event.y_root)
+
+    def process_selection(self, action):
+        try:
+            selected_text = self.chat_history.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if not selected_text:
+                return
+
+            prompt = ""
+            if action == "summarize":
+                prompt = f"Summarize the following text:\n\n{selected_text}"
+            elif action == "tldr":
+                prompt = f"Provide a TL;DR version of the following text:\n\n{selected_text}"
+            elif action == "explain_simple":
+                prompt = f"Explain the following text in simpler terms:\n\n{selected_text}"
+            elif action == "explain_more":
+                prompt = f"Tell me more about the following text:\n\n{selected_text}"
+            elif action == "explain_detail":
+                prompt = f"Add more detail and examples to the following text:\n\n{selected_text}"
+            elif action == "rewrite_rephrase":
+                prompt = f"Rephrase the following text:\n\n{selected_text}"
+            elif action == "rewrite_formal":
+                prompt = f"Make the following text more formal:\n\n{selected_text}"
+            elif action == "rewrite_informal":
+                prompt = f"Make the following text more informal:\n\n{selected_text}"
+            elif action == "rewrite_professional":
+                prompt = f"Make the following text more professional:\n\n{selected_text}"
+            elif action == "rewrite_improve":
+                prompt = f"Improve the grammar and style of the following text:\n\n{selected_text}"
+            elif action == "translate_english":
+                prompt = f"Translate the following text to English:\n\n{selected_text}"
+            elif action == "translate_detect":
+                prompt = f"Detect the language of the following text and translate it to English:\n\n{selected_text}"
+            elif action == "analyze_sentiment":
+                prompt = f"Analyze the sentiment and tone of the following text:\n\n{selected_text}"
+            elif action == "analyze_bias":
+                prompt = f"Identify any assumptions or bias in the following text:\n\n{selected_text}"
+            elif action == "analyze_topic":
+                prompt = f"Classify the topic of the following text:\n\n{selected_text}"
+            elif action == "ask_generate":
+                prompt = f"Generate questions from the following text:\n\n{selected_text}"
+            elif action == "ask_what_questions":
+                prompt = f"What questions can I ask about the following text?:\n\n{selected_text}"
+            elif action == "extract_key_points":
+                prompt = f"Highlight the key points in the following text:\n\n{selected_text}"
+            elif action == "extract_entities":
+                prompt = f"Extract named entities (people, places, dates, etc.) from the following text:\n\n{selected_text}"
+            elif action == "extract_action_items":
+                prompt = f"Pull out any action items from the following text:\n\n{selected_text}"
+            elif action == "expand_continue":
+                prompt = f"Continue writing from the following text:\n\n{selected_text}"
+            elif action == "expand_follow_up":
+                prompt = f"Generate a follow-up paragraph, story, or argument based on the following text:\n\n{selected_text}"
+            elif action == "define_terms":
+                prompt = f"Define the following term(s):\n\n{selected_text}"
+            elif action == "define_context":
+                prompt = f"Provide background or context for the following text:\n\n{selected_text}"
+            elif action == "respond_reply":
+                prompt = f"Write a reply or response to the following text:\n\n{selected_text}"
+            elif action == "respond_discuss":
+                # This action will be handled differently, as it creates a new session
+                self.start_discussion_from_selection()
+                return
+
+            messages = [{"role": "user", "content": prompt}]
+            
+            assistant_full_reply = send_to_api(
+                self.session_name, 
+                messages, 
+                self.model_var.get(), 
+                self.session_id, 
+                widget=self.chat_history, 
+                save_message_to_db=True
+            )
+            if assistant_full_reply:
+                self.summarize_and_rename_session()
+
+        except tk.TclError:
+            # This can happen if there is no selection
+            pass
+        except Exception as e:
+            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+
+    def start_discussion_from_selection(self):
+        try:
+            selected_text = self.chat_history.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if not selected_text:
+                return
+
+            # Summarize the selected text to create a title for the new session
+            prompt = f"Summarize the following text in 5 words or less to use as a title for a new chat session:\n\n{selected_text}"
+            messages = [{"role": "user", "content": prompt}]
+            
+            new_session_name = send_to_api(
+                "New Discussion", 
+                messages, 
+                "gpt-3.5-turbo", 
+                self.session_id, 
+                widget=None, 
+                save_message_to_db=False
+            ).strip().strip('"')
+
+            if not new_session_name:
+                new_session_name = "New Discussion"
+
+            # Create a new session with the generated title
+            new_session_id = create_session(new_session_name, self.model_var.get(), self.system_prompt_text.get("1.0", tk.END).strip())
+            save_message(new_session_id, "user", f"Let's discuss the following:\n\n{selected_text}")
+            self.load_sessions()
+            
+            # Select the new session
+            item_to_select = self.find_tree_item_by_id(new_session_id)
+            if item_to_select:
+                self.session_tree.selection_set(item_to_select)
+                self.session_tree.focus(item_to_select)
+
+        except tk.TclError:
+            # This can happen if there is no selection
+            pass
+        except Exception as e:
+            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
 
     def copy_chat_selection(self):
         try:
@@ -1074,18 +1314,16 @@ class ChatApp(tk.Tk):
             ).strip().strip('"') # Strip quotes from the response
 
             if new_name and new_name != self.session_name and len(new_name.split()) <= 5:
-                current_selection_index = self.session_list.curselection()
-                if not current_selection_index:
+                item_to_select = self.find_tree_item_by_id(self.session_id)
+                if not item_to_select:
                     return 
 
                 update_session_name(self.session_id, new_name)
                 self.session_name = new_name
                 
                 # Update the name in the listbox directly
-                self.session_list.delete(current_selection_index[0])
-                self.session_list.insert(current_selection_index[0], new_name)
-                self.session_list.selection_set(current_selection_index[0])
-                self.title(f"Ask Proxy GUI - {self.session_name}")
+                self.session_tree.item(item_to_select, text=new_name)
+                self.title(f"{APP_NAME} - {self.session_name}")
 
 
         except Exception as e:
