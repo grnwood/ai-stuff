@@ -580,6 +580,8 @@ class ChatApp(tk.Tk):
         self.chat_history.bind("<Button-3>", self.show_chat_context_menu)
 
         self.selection_context_menu = tk.Menu(self.chat_history, tearoff=0)
+        self.selection_context_menu.add_command(label="Copy", command=self.copy_chat_selection)
+        self.selection_context_menu.add_separator()
         summarize_menu = tk.Menu(self.selection_context_menu, tearoff=0)
         summarize_menu.add_command(label="Summarize this text", command=lambda: self.process_selection("summarize"))
         summarize_menu.add_command(label="TL;DR version", command=lambda: self.process_selection("tldr"))
@@ -667,8 +669,10 @@ class ChatApp(tk.Tk):
         self.system_prompt_text.bind("<<Modified>>", self.on_system_prompt_modified)
 
         # --- Toggle Button for Right Panel ---
-        self.toggle_right_panel_button = ttk.Button(self, text="<", command=self.toggle_right_panel)
-        self.toggle_right_panel_button.place(relx=1.0, rely=0.5, anchor="e")
+        style = ttk.Style()
+        style.configure("Small.TButton", padding=1, font=('TkDefaultFont', 7))
+        self.toggle_right_panel_button = ttk.Button(self, text="<", command=self.toggle_right_panel, style="Small.TButton")
+        self.toggle_right_panel_button.place(relx=1.0, rely=0.0, x=-2, y=2, anchor="ne")
 
         # --- Status Bar ---
         self.status_bar = ttk.Label(self, text="", anchor=tk.W)
@@ -1144,80 +1148,92 @@ class ChatApp(tk.Tk):
             if not selected_text:
                 return
 
-            prompt = ""
-            if action == "summarize":
-                prompt = f"Summarize the following text:\n\n{selected_text}"
-            elif action == "tldr":
-                prompt = f"Provide a TL;DR version of the following text:\n\n{selected_text}"
-            elif action == "explain_simple":
-                prompt = f"Explain the following text in simpler terms:\n\n{selected_text}"
-            elif action == "explain_more":
-                prompt = f"Tell me more about the following text:\n\n{selected_text}"
-            elif action == "explain_detail":
-                prompt = f"Add more detail and examples to the following text:\n\n{selected_text}"
-            elif action == "rewrite_rephrase":
-                prompt = f"Rephrase the following text:\n\n{selected_text}"
-            elif action == "rewrite_formal":
-                prompt = f"Make the following text more formal:\n\n{selected_text}"
-            elif action == "rewrite_informal":
-                prompt = f"Make the following text more informal:\n\n{selected_text}"
-            elif action == "rewrite_professional":
-                prompt = f"Make the following text more professional:\n\n{selected_text}"
-            elif action == "rewrite_improve":
-                prompt = f"Improve the grammar and style of the following text:\n\n{selected_text}"
-            elif action == "translate_english":
-                prompt = f"Translate the following text to English:\n\n{selected_text}"
-            elif action == "translate_detect":
-                prompt = f"Detect the language of the following text and translate it to English:\n\n{selected_text}"
-            elif action == "analyze_sentiment":
-                prompt = f"Analyze the sentiment and tone of the following text:\n\n{selected_text}"
-            elif action == "analyze_bias":
-                prompt = f"Identify any assumptions or bias in the following text:\n\n{selected_text}"
-            elif action == "analyze_topic":
-                prompt = f"Classify the topic of the following text:\n\n{selected_text}"
-            elif action == "ask_generate":
-                prompt = f"Generate questions from the following text:\n\n{selected_text}"
-            elif action == "ask_what_questions":
-                prompt = f"What questions can I ask about the following text?:\n\n{selected_text}"
-            elif action == "extract_key_points":
-                prompt = f"Highlight the key points in the following text:\n\n{selected_text}"
-            elif action == "extract_entities":
-                prompt = f"Extract named entities (people, places, dates, etc.) from the following text:\n\n{selected_text}"
-            elif action == "extract_action_items":
-                prompt = f"Pull out any action items from the following text:\n\n{selected_text}"
-            elif action == "expand_continue":
-                prompt = f"Continue writing from the following text:\n\n{selected_text}"
-            elif action == "expand_follow_up":
-                prompt = f"Generate a follow-up paragraph, story, or argument based on the following text:\n\n{selected_text}"
-            elif action == "define_terms":
-                prompt = f"Define the following term(s):\n\n{selected_text}"
-            elif action == "define_context":
-                prompt = f"Provide background or context for the following text:\n\n{selected_text}"
-            elif action == "respond_reply":
-                prompt = f"Write a reply or response to the following text:\n\n{selected_text}"
-            elif action == "respond_discuss":
-                # This action will be handled differently, as it creates a new session
+            prompt_map = {
+                "summarize": "Summarize the following text",
+                "tldr": "Provide a TL;DR version of the following text",
+                "explain_simple": "Explain the following text in simpler terms",
+                "explain_more": "Tell me more about the following text",
+                "explain_detail": "Add more detail and examples to the following text",
+                "rewrite_rephrase": "Rephrase the following text",
+                "rewrite_formal": "Make the following text more formal",
+                "rewrite_informal": "Make the following text more informal",
+                "rewrite_professional": "Make the following text more professional",
+                "rewrite_improve": "Improve the grammar and style of the following text",
+                "translate_english": "Translate the following text to English",
+                "translate_detect": "Detect the language of the following text and translate it to English",
+                "analyze_sentiment": "Analyze the sentiment and tone of the following text",
+                "analyze_bias": "Identify any assumptions or bias in the following text",
+                "analyze_topic": "Classify the topic of the following text",
+                "ask_generate": "Generate questions from the following text",
+                "ask_what_questions": "What questions can I ask about the following text?",
+                "extract_key_points": "Highlight the key points in the following text",
+                "extract_entities": "Extract named entities (people, places, dates, etc.) from the following text",
+                "extract_action_items": "Pull out any action items from the following text",
+                "expand_continue": "Continue writing from the following text",
+                "expand_follow_up": "Generate a follow-up paragraph, story, or argument based on the following text",
+                "define_terms": "Define the following term(s)",
+                "define_context": "Provide background or context for the following text",
+                "respond_reply": "Write a reply or response to the following text",
+            }
+
+            if action == "respond_discuss":
                 self.start_discussion_from_selection()
                 return
 
-            messages = [{"role": "user", "content": prompt}]
+            if action in prompt_map:
+                prompt_text = prompt_map[action]
+                full_prompt = f"{prompt_text}:\n\n---\n\n{selected_text}"
+                self.send_prompt_as_user(full_prompt)
             
-            assistant_full_reply = send_to_api(
-                self.session_name, 
-                messages, 
-                self.model_var.get(), 
-                self.session_id, 
-                widget=self.chat_history, 
-                save_message_to_db=True
-            )
-            if assistant_full_reply:
-                self.summarize_and_rename_session()
-
         except tk.TclError:
             # This can happen if there is no selection
             pass
         except Exception as e:
             messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+
+    def send_prompt_as_user(self, prompt_content):
+        if not self.session_id:
+            messagebox.showinfo("Action", "Please select a session first.")
+            return
+
+        active_session_id = self.session_id
+        save_message(self.session_id, "user", prompt_content)
+        save_input_history(self.session_id, prompt_content)
+        self.message_history = get_input_history(self.session_id)
+        self.history_index = len(self.message_history)
+        
+        messages = get_messages(self.session_id)
+        message_blocks = [{"role": role, "content": content} for role, content in messages]
+        
+        system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
+        if system_prompt:
+            message_blocks.insert(0, {"role": "system", "content": system_prompt})
+
+        self.input_box.configure(state="disabled")
+        self.chat_history.configure(state="normal")
+        self.chat_history.insert(tk.END, f"User:\n{prompt_content}\n\n", ("user_tag", "bold"))
+        self.chat_history.see(tk.END)
+        self.chat_history.configure(state="disabled")
+        self.update_idletasks()
+
+        try:
+            assistant_full_reply = send_to_api(self.session_name, message_blocks, self.model_var.get(), self.session_id, widget=self.chat_history, save_message_to_db=True)
+            if assistant_full_reply:
+                self.summarize_and_rename_session()
+        except requests.exceptions.RequestException as e:
+            messagebox.showerror("Network Error", f"Could not connect to the server or API: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+        finally:
+            self.input_box.configure(state="normal")
+            self.input_box.focus_set()
+            
+            item_to_select = self.find_tree_item_by_id(active_session_id)
+            if item_to_select:
+                self.session_tree.selection_set(item_to_select)
+                self.session_tree.focus(item_to_select)
+
+            self.load_chat_history()
 
     def start_discussion_from_selection(self):
         try:
