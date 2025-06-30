@@ -8,7 +8,6 @@ import sqlite3
 from markdown import markdown
 from html.parser import HTMLParser
 from dotenv import load_dotenv
-from openai import OpenAI
 from tkinter import font
 
 load_dotenv()
