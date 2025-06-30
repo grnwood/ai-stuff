@@ -27,7 +27,7 @@ app.use((req, res, next) => {
   next()
 })
 
-app.get('/v1/models', async (req, res) => {
+app.get('/mods', async (req, res) => {
   try {
     console.log("Incoming request body:", req.body);
     const openaiRes = await fetch('https://api.openai.com/v1/models', {

@@ -19,7 +19,7 @@ DB_PATH = "chat_sessions.db"
 
 def get_available_models():
     try:
-        response = requests.get(f"{API_URL}/v1/models", headers={"x-api-secret": API_SECRET})
+        response = requests.get(f"{API_URL}/mods", headers={"x-api-secret": API_SECRET})
         response.raise_for_status()
         models = response.json()
         # The structure from the proxy is already a list of model objects
