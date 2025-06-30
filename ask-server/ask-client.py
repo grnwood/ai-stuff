@@ -13,16 +13,17 @@ from tkinter import font
 
 load_dotenv()
 
-API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000/chat")
+API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 DB_PATH = "chat_sessions.db"
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 def get_available_models():
     try:
-        models = client.models.list()
-        available_models = sorted([model.id for model in models.data if "gpt" in model.id]) # Filter for GPT models and sort
+        response = requests.get(f"{API_URL}/v1/models", headers={"x-api-secret": API_SECRET})
+        response.raise_for_status()
+        models = response.json()
+        # The structure from the proxy is already a list of model objects
+        available_models = sorted([model['id'] for model in models['data'] if "gpt" in model['id']])
         return available_models
     except Exception as e:
         print(f"Error fetching models: {e}")
@@ -151,7 +152,35 @@ def delete_session_and_messages(session_id):
     conn.close()
 
 # --- API ---
-def send_to_api(session_name, messages, model, chat_history_widget, current_session_id):
+def stream_and_process_response(resp, widget):
+    assistant_full_reply = ""
+    for line in resp.iter_lines():
+        if line:
+            decoded_line = line.decode('utf-8')
+            if decoded_line.startswith("data: "):
+                json_data = decoded_line[len("data: "):]
+                if json_data == "[DONE]":
+                    break
+                try:
+                    data = json.loads(json_data)
+                    if 'choices' in data and len(data['choices']) > 0:
+                        delta = data['choices'][0]['delta']
+                        if 'content' in delta:
+                            content_chunk = delta['content']
+                            assistant_full_reply += content_chunk
+                            if widget:
+                                widget.configure(state="normal")
+                                widget.insert(tk.END, content_chunk)
+                                widget.configure(state="disabled")
+                                widget.see(tk.END)
+                                widget.update_idletasks()
+                except json.JSONDecodeError:
+                    print(f"Skipping non-JSON line: {decoded_line}")
+    return assistant_full_reply
+
+def send_to_api(session_name, messages, model, chat_history_widget, current_session_id, widget=None, save_message_to_db=True):
+    if widget is None:
+        widget = chat_history_widget
     payload = {
         "model": model,
         "messages": messages,
@@ -163,38 +192,20 @@ def send_to_api(session_name, messages, model, chat_history_widget, current_sess
     }
 
     assistant_full_reply = ""
-    chat_history_widget.configure(state="normal")
-    chat_history_widget.insert(tk.END, "Assistant:\n", ("assistant_tag")) # Start assistant message
-    chat_history_widget.configure(state="disabled")
-    chat_history_widget.see(tk.END)
-    chat_history_widget.update_idletasks()
+    if widget:
+        widget.configure(state="normal")
+        widget.insert(tk.END, "Assistant:\n", ("assistant_tag")) # Start assistant message
+        widget.configure(state="disabled")
+        widget.see(tk.END)
+        widget.update_idletasks()
 
-    with requests.post(API_URL, json=payload, headers=headers, stream=True) as resp:
+    with requests.post(f"{API_URL}/v1/chat/completions", json=payload, headers=headers, stream=True) as resp:
         resp.raise_for_status()
-        for line in resp.iter_lines():
-            if line:
-                decoded_line = line.decode('utf-8')
-                if decoded_line.startswith("data: "):
-                    json_data = decoded_line[len("data: "):]
-                    if json_data == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(json_data)
-                        if 'choices' in data and len(data['choices']) > 0:
-                            delta = data['choices'][0]['delta']
-                            if 'content' in delta:
-                                content_chunk = delta['content']
-                                assistant_full_reply += content_chunk
-                                chat_history_widget.configure(state="normal")
-                                chat_history_widget.insert(tk.END, content_chunk)
-                                chat_history_widget.configure(state="disabled")
-                                chat_history_widget.see(tk.END)
-                                chat_history_widget.update_idletasks()
-                    except json.JSONDecodeError:
-                        print(f"Skipping non-JSON line: {decoded_line}")
+        assistant_full_reply = stream_and_process_response(resp, widget)
     
     # Save the complete assistant reply after streaming is done
-    save_message(current_session_id, "assistant", assistant_full_reply)
+    if save_message_to_db:
+        save_message(current_session_id, "assistant", assistant_full_reply)
     return assistant_full_reply
 
 
@@ -804,16 +815,21 @@ class ChatApp(tk.Tk):
         prompt = f"current chat session name is '{self.session_name}'. Summarize this session in 5 words or less only change it when a significant shift occurs:\n\n{conversation}"
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that summarizes chat sessions."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=15,
-                temperature=0.5,
-            )
-            new_name = response.choices[0].message.content.strip()
+            messages_for_summary = [
+                {"role": "system", "content": "You are a helpful assistant that summarizes chat sessions."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            # Call send_to_api without a widget to get the response directly
+            new_name = send_to_api(
+                self.session_name, 
+                messages_for_summary, 
+                "gpt-3.5-turbo", 
+                self.chat_history, 
+                self.session_id, 
+                widget=None,
+                save_message_to_db=False
+            ).strip()
 
             if new_name and new_name != self.session_name and len(new_name.split()) <= 5:
                 current_selection_index = self.session_list.curselection()
@@ -857,25 +873,19 @@ class ChatApp(tk.Tk):
 
         self.input_box.configure(state="disabled")
         self.chat_history.configure(state="normal")
-        self.chat_history.insert(tk.END, "\nSending...\n", ("sending_tag"))
+        self.chat_history.insert(tk.END, f"User:\n{content}\n\n", ("user_tag", "bold"))
         self.chat_history.see(tk.END)
         self.chat_history.configure(state="disabled")
         self.update_idletasks()
 
         try:
-            send_to_api(self.session_name, message_blocks, self.model_var.get(), self.chat_history, self.session_id)
-            self.load_chat_history()
-            self.summarize_and_rename_session()
+            assistant_full_reply = send_to_api(self.session_name, message_blocks, self.model_var.get(), self.chat_history, self.session_id, widget=self.chat_history, save_message_to_db=True)
+            if assistant_full_reply: # Only summarize if there was a response
+                self.summarize_and_rename_session()
         except requests.exceptions.RequestException as e:
             messagebox.showerror("Network Error", f"Could not connect to the server or API: {e}")
-            self.chat_history.configure(state="normal")
-            self.chat_history.delete("end-2l", "end-1c")
-            self.chat_history.configure(state="disabled")
         except Exception as e:
             messagebox.showerror("Error", f"An unexpected error occurred: {e}")
-            self.chat_history.configure(state="normal")
-            self.chat_history.delete("end-2l", "end-1c")
-            self.chat_history.configure(state="disabled")
         finally:
             self.input_box.configure(state="normal")
             self.input_box.focus_set()
@@ -887,6 +897,7 @@ class ChatApp(tk.Tk):
                     self.session_list.activate(i)
                     self.session_list.see(i)
                     break
+            self.load_chat_history()
 
         return "break"
 
