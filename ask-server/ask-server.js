@@ -15,7 +15,7 @@ if (!OPENAI_API_KEY || !API_SECRET_TOKEN) {
   process.exit(1)
 }
 
-app.use(cors())
+app.use(cors())  
 app.use(express.json())
 
 // 🔐 Auth middleware
@@ -27,8 +27,32 @@ app.use((req, res, next) => {
   next()
 })
 
+app.get('/v1/models', async (req, res) => {
+  try {
+    console.log("Incoming request body:", req.body);
+    const openaiRes = await fetch('https://api.openai.com/v1/models', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      },
+    })
+
+    if (!openaiRes.ok) {
+      const errorBody = await openaiRes.text()
+      console.error('❌ OpenAI API error:', openaiRes.status, errorBody)
+      return res.status(openaiRes.status).json({ error: 'Failed to fetch models from OpenAI' })
+    }
+
+    const data = await openaiRes.json()
+    res.json(data)
+  } catch (err) {
+    console.error('❌ Proxy error fetching models:', err)
+    res.status(500).json({ error: 'Proxy server error' })
+  }
+})
+
 // 🎯 POST /chat (with optional streaming)
-app.post('/chat', async (req, res) => {
+app.post('/v1/chat/completions', async (req, res) => {
   const {
     model = 'gpt-3.5-turbo',
     messages = [],
