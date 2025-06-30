@@ -77,7 +77,7 @@ def save_setting(key, value):
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, model, system_prompt FROM sessions")
+    c.execute("SELECT id, name, model, system_prompt FROM sessions ORDER BY id")
     sessions = c.fetchall()
     conn.close()
     return sessions
@@ -90,6 +90,16 @@ def create_session(name, model='gpt-3.5-turbo', system_prompt=''):
     session_id = c.lastrowid
     conn.close()
     return session_id
+
+
+def update_session_model(session_id, model):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET model = ? WHERE id = ?", (model, session_id))
+    conn.commit()
+    conn.close()
+
+
 
 def update_session_system_prompt(session_id, system_prompt):
     conn = sqlite3.connect(DB_PATH)
@@ -178,9 +188,7 @@ def stream_and_process_response(resp, widget):
                     print(f"Skipping non-JSON line: {decoded_line}")
     return assistant_full_reply
 
-def send_to_api(session_name, messages, model, chat_history_widget, current_session_id, widget=None, save_message_to_db=True):
-    if widget is None:
-        widget = chat_history_widget
+def send_to_api(session_name, messages, model, current_session_id, widget=None, save_message_to_db=True):
     payload = {
         "model": model,
         "messages": messages,
@@ -227,7 +235,9 @@ def markdown_to_text(md):
     parser.feed(html)
     return parser.get_text()
 
-# --- GUI ---
+LEPRECHAUN_ICON_B64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAABmJLR0QA/wD/AP+gvaeTAAAFFklEQVRoge2ZWWxUVRjHnf/O3jIznbZ0m5aaaYFKKZBaQwutBmlQSRpjwgPGYMUQibyw+GLUBBLjk0iCEpVIQIlGMJIYcUlqUQyrEhdKSwttodBtCtOWlk5nvXN9GB0ytKV37m0Fk/6eZs73nfP9//cs90wLM8www/8aIZHk/Ycv1QoyL4NQBKROk6Z/EE6tXzu3crIsvdLhDhxqfRdZ3qZNVCLIy5VkiUqSPvmy7RGQt2oTND0oMiBLkQ0kuNz+KxQZEAQmXYv3C0V7QIbcyXJEOUy2p46swZ9xjDRiDHqQBR2j5lw89gq605/k1qyF2hXfhdJNnHKvoN3bQlnLZqy+q2NiptAAjtsNzO3ay4B1Mc3527iZUqFG67goWkLjI1OZcRZ7sINljbVx4g1COjZdJTZ9JQYhLdaeevs8yxtrKWvZgjE8pEV3DNUGMsz9FNqusCr7R8x442IWXRGiYELEhEUsGtM31/M9K/6owTZ6WW35GKoNuKzRJ57sSCb5ibUIBmNC/S1BN1UNz2PzXlIrAdBgICfJHfusz3ZhrdmILt0JgE9qJkKAiOzHJ7cAYHDOwramENuaQgzO5GhbeIjy5lcwaFhOqg0k60fjB7KlYV39EuZFVYTkfobDJxmWThGK9ANgqchCTNIjJumxlGfF+iX5u3j4+ntqZag3IMm6cUbTYS5diWlBeUJjPdT7BeaQR5UO1QZu+NMnjJkWLhvT5jvTS2Q0TMQbwnfWHRcT5TC5N4+q0qHawMVb8yeM+SIGwpH4m0eo28vwV20MH2kn1O0d0yf91llVOlQb6BnN5vxAybixb3+5xgdt+Uiy8utTsr9LlQ4NLzL4c6CEY72P4"
+COG_ICON_B64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAHpJREFUOE9jZKAQMFKon4F4CyzFcPSfD38gI6B4dIO8+P+fg4F4M5D/D8r/xf4/A/l/I/x/Zvz/x/A/kP8P8v9D/D8s/A/k/4P8/xD/H8b/B/I/Qfw/yP8f4v8D+f8g/x/E/wfy/0H8/yD//wD5/yD+P8j/BwA5wwtAxwIEAwOOA58JihOfpB3A5sA0gqQA5gU1AAB2tX9dbYsrNQAAAABJRU5ErkJggg=="
+
 class ToolTip:
     def __init__(self, widget):
         self.widget = widget
@@ -240,9 +250,9 @@ class ToolTip:
         self.text = text
         if self.tip_window or not self.text:
             return
-        x, y, _, _ = self.widget.bbox("insert")
-        x = x + self.widget.winfo_rootx() + 25
-        y = y + self.widget.winfo_rooty() + 20
+        x, y = self.widget.winfo_pointerxy()
+        x = x + 25
+        y = y + 20
         self.tip_window = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(1)
         tw.wm_geometry(f"+{x}+{y}")
@@ -282,11 +292,20 @@ class ChatApp(tk.Tk):
         
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
+        self.chat_font_size = tk.IntVar(value=get_setting("chat_font_size", 10))
+        self.ui_font_size = tk.IntVar(value=get_setting("ui_font_size", 12))
 
         self.build_gui()
         self.apply_theme()
         self.apply_font()
+        self.apply_ui_font()
         self.load_sessions()
+
+        self.bind("<Control-equal>", self.increase_font_size)
+        self.bind("<Control-minus>", self.decrease_font_size)
+        self.bind("<Control-f>", self.find_dialog)
+        self.search_matches = []
+        self.current_match_index = -1
 
     def on_model_selected(self, event):
         if self.session_id:
@@ -294,15 +313,23 @@ class ChatApp(tk.Tk):
             update_session_model(self.session_id, selected_model)
 
     def on_session_list_motion(self, event):
-        index = self.session_list.index(f"@{event.x},{event.y}")
-        if index != self.last_hovered_index:
-            self.last_hovered_index = index
+        try:
+            index = self.session_list.index(f"@{event.x},{event.y}")
+            if index != self.last_hovered_index:
+                self.last_hovered_index = index
+                self.session_tooltip.hidetip()
+                try:
+                    session_name = self.session_list.get(index)
+                    self.session_tooltip.showtip(session_name)
+                except tk.TclError:
+                    pass # Ignore errors when mouse is not over an item
+        except tk.TclError:
+            self.last_hovered_index = -1
             self.session_tooltip.hidetip()
-            try:
-                session_name = self.session_list.get(index)
-                self.session_tooltip.showtip(session_name)
-            except tk.TclError:
-                pass # Ignore errors when mouse is not over an item
+
+    def hide_session_tooltip(self, event=None):
+        self.session_tooltip.hidetip()
+        self.last_hovered_index = -1
     
     def show_session_context_menu(self, event):
         try:
@@ -348,7 +375,7 @@ class ChatApp(tk.Tk):
     def build_gui(self):
         # Main PanedWindow (Left and Right Panels)
         self.main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        self.main_paned_window.pack(fill=tk.BOTH, expand=True)
+        self.main_paned_window.pack(fill=tk.BOTH, expand=True, pady=10)
 
         # Left PanedWindow (Session List and Main Chat Area)
         self.left_paned_window = ttk.PanedWindow(self.main_paned_window, orient=tk.HORIZONTAL)
@@ -361,19 +388,20 @@ class ChatApp(tk.Tk):
         self.left_frame.rowconfigure(2, weight=1)
 
         self.model_label = ttk.Label(self.left_frame, text="Select Model:")
-        self.model_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.model_label.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
         self.model_var = tk.StringVar()
         self.model_dropdown = ttk.Combobox(self.left_frame, textvariable=self.model_var, state="readonly")
-        self.model_dropdown.grid(row=1, column=0, sticky="ew", padx=5, pady=2)
+        self.model_dropdown.grid(row=1, column=0, sticky="ew", padx=10, pady=2)
         self.model_dropdown['values'] = get_available_models()
         self.model_dropdown.set("gpt-3.5-turbo")
         self.model_dropdown.bind('<<ComboboxSelected>>', self.on_model_selected)
 
         self.session_list = tk.Listbox(self.left_frame)
-        self.session_list.grid(row=2, column=0, sticky="nsew")
+        self.session_list.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
         self.session_list.bind('<<ListboxSelect>>', self.select_session)
         self.session_list.bind('<Button-3>', self.show_session_context_menu)
         self.session_list.bind('<Motion>', self.on_session_list_motion)
+        self.session_list.bind('<Leave>', self.hide_session_tooltip)
 
         self.session_tooltip = ToolTip(self.session_list)
         self.last_hovered_index = -1
@@ -383,16 +411,16 @@ class ChatApp(tk.Tk):
         self.session_context_menu.add_command(label="Delete", command=self.delete_session)
 
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
-        self.new_button.grid(row=3, column=0, sticky="ew")
+        self.new_button.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 2))
 
         self.export_button = ttk.Button(self.left_frame, text="Export Chat", command=self.export_chat)
-        self.export_button.grid(row=4, column=0, sticky="ew")
+        self.export_button.grid(row=4, column=0, sticky="ew", padx=10, pady=2)
 
         self.import_button = ttk.Button(self.left_frame, text="Import Chat", command=self.import_chat)
-        self.import_button.grid(row=5, column=0, sticky="ew")
+        self.import_button.grid(row=5, column=0, sticky="ew", padx=10, pady=2)
 
         self.settings_button = ttk.Button(self.left_frame, text="Settings", command=self.open_settings)
-        self.settings_button.grid(row=6, column=0, sticky="ew")
+        self.settings_button.grid(row=6, column=0, sticky="ew", padx=10, pady=(2, 10))
 
         # --- Main Chat Area ---
         self.main_frame = ttk.Frame(self.left_paned_window)
@@ -400,9 +428,23 @@ class ChatApp(tk.Tk):
         self.main_frame.rowconfigure(0, weight=1)
         self.main_frame.columnconfigure(0, weight=1)
 
-        self.chat_history = ScrolledText(self.main_frame, wrap=tk.WORD)
+        self.chat_history = ScrolledText(self.main_frame, wrap=tk.WORD, padx=10)
         self.chat_history.grid(row=0, column=0, sticky="nsew")
         self.chat_history.bind("<KeyPress>", lambda e: "break")
+
+        self.search_frame = ttk.Frame(self.main_frame)
+        # self.search_frame.grid(row=1, column=0, sticky="ew", pady=2)
+        self.search_entry = ttk.Entry(self.search_frame)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.search_entry.bind("<Return>", self.find_next)
+        self.search_entry.bind("<Escape>", self.hide_search)
+        self.next_button = ttk.Button(self.search_frame, text="Next", command=self.find_next)
+        self.next_button.pack(side=tk.LEFT)
+        self.prev_button = ttk.Button(self.search_frame, text="Prev", command=self.find_prev)
+        self.prev_button.pack(side=tk.LEFT)
+        self.close_button = ttk.Button(self.search_frame, text="X", command=self.hide_search)
+        self.close_button.pack(side=tk.LEFT)
+        self.search_frame.grid_remove() # Hide by default
 
         self.chat_history.tag_config("user_tag", foreground="#0078D7")
         self.chat_history.tag_config("assistant_tag", foreground="#008000")
@@ -431,13 +473,18 @@ class ChatApp(tk.Tk):
         # --- Right Panel (System Prompt) ---
         self.right_frame = ttk.Frame(self.main_paned_window, width=250)
         self.right_frame.columnconfigure(0, weight=1)
-        self.right_frame.rowconfigure(1, weight=1)
+        self.right_frame.rowconfigure(2, weight=1)
         
+        self.logo_frame = ttk.Frame(self.right_frame)
+        self.logo_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        self.logo_frame.columnconfigure(0, weight=1)
+
+       
         self.system_prompt_label = ttk.Label(self.right_frame, text="System Prompt:")
-        self.system_prompt_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.system_prompt_label.grid(row=1, column=0, sticky="w", padx=5, pady=5)
         
         self.system_prompt_text = ScrolledText(self.right_frame, wrap=tk.WORD, height=10)
-        self.system_prompt_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.system_prompt_text.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
         self.system_prompt_text.bind("<<Modified>>", self.on_system_prompt_modified)
 
         # --- Toggle Button for Right Panel ---
@@ -447,6 +494,14 @@ class ChatApp(tk.Tk):
         # --- Status Bar ---
         self.status_bar = ttk.Label(self, text="", anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def toggle_system_prompt(self):
+        if self.system_prompt_text.winfo_ismapped():
+            self.system_prompt_text.grid_remove()
+            self.system_prompt_label.grid_remove()
+        else:
+            self.system_prompt_text.grid()
+            self.system_prompt_label.grid()
 
     def toggle_right_panel(self):
         if self.right_frame.winfo_ismapped():
@@ -468,6 +523,7 @@ class ChatApp(tk.Tk):
 
     def apply_theme(self):
         theme = self.theme.get()
+        s = ttk.Style()
         if theme == "dark":
             self.configure(bg="#2b2b2b")
             # Left panel
@@ -489,11 +545,18 @@ class ChatApp(tk.Tk):
             self.system_prompt_label.configure(style="Dark.TLabel")
             self.system_prompt_text.configure(bg="#3c3f41", fg="white", insertbackground="white")
             # Style configuration
-            s = ttk.Style()
             s.configure("Dark.TFrame", background="#2b2b2b")
             s.configure("Dark.TLabel", background="#2b2b2b", foreground="white")
             s.configure("Dark.TButton", background="#4f5254", foreground="white")
             s.map("Dark.TButton", background=[('active', '#6f7274')])
+            if os.name == 'nt':
+                s.layout("Dark.TButton", [
+                    ("Button.border", {"children":
+                        [("Button.padding", {"children":
+                            [("Button.label", {"side": "left", "expand": 1})]
+                        })]
+                    })
+                ])
         else: # Light mode
             self.configure(bg="#f0f0f0")
             # Left panel
@@ -517,20 +580,37 @@ class ChatApp(tk.Tk):
 
     def apply_font(self):
         font_name = self.chat_font.get()
+        font_size = self.chat_font_size.get()
         try:
-            custom_font = font.Font(family=font_name, size=10)
+            custom_font = font.Font(family=font_name, size=font_size)
             self.chat_history.configure(font=custom_font)
             self.input_box.configure(font=custom_font)
         except tk.TclError:
             print(f"Font '{font_name}' not found, using default.")
-            default_font = font.Font(family="TkDefaultFont", size=10)
+            default_font = font.Font(family="TkDefaultFont", size=font_size)
             self.chat_history.configure(font=default_font)
             self.input_box.configure(font=default_font)
+
+    def apply_ui_font(self):
+        ui_font_size = self.ui_font_size.get()
+        style = ttk.Style()
+        style.configure("TLabel", font=(None, ui_font_size))
+        style.configure("TButton", font=(None, ui_font_size))
+        style.configure("TCombobox", font=(None, ui_font_size))
+        self.session_list.configure(font=(None, ui_font_size))
+        self.system_prompt_text.configure(font=(None, ui_font_size))
 
     def open_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("Settings")
         settings_win.geometry("300x300")
+
+        if self.theme.get() == "dark":
+            settings_win.configure(bg="#2b2b2b")
+            # Apply dark theme to all widgets in the settings window
+            for widget in settings_win.winfo_children():
+                if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
+                    widget.configure(style="Dark.TLabel")
         
         # Theme settings
         ttk.Label(settings_win, text="Theme:").pack(pady=5)
@@ -538,6 +618,18 @@ class ChatApp(tk.Tk):
         def on_theme_change():
             save_setting("theme", self.theme.get())
             self.apply_theme()
+            # Re-apply theme to settings window
+            if self.theme.get() == "dark":
+                settings_win.configure(bg="#2b2b2b")
+                for widget in settings_win.winfo_children():
+                    if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
+                        widget.configure(style="Dark.TLabel")
+            else:
+                settings_win.configure(bg="#f0f0f0")
+                for widget in settings_win.winfo_children():
+                    if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
+                        widget.configure(style="TLabel")
+
 
         light_radio = ttk.Radiobutton(settings_win, text="Light", variable=self.theme, value="light", command=on_theme_change)
         light_radio.pack(anchor=tk.W, padx=20)
@@ -569,6 +661,28 @@ class ChatApp(tk.Tk):
         font_dropdown = ttk.Combobox(settings_win, textvariable=self.chat_font, state="readonly", values=font_families)
         font_dropdown.pack(fill=tk.X, padx=20)
         self.chat_font.trace_add("write", on_font_change)
+
+        # Chat font size settings
+        ttk.Label(settings_win, text="Chat Font Size:").pack(pady=5)
+
+        def on_font_size_change(*args):
+            save_setting("chat_font_size", self.chat_font_size.get())
+            self.apply_font()
+
+        font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
+        font_size_spinbox.pack(fill=tk.X, padx=20)
+        self.chat_font_size.trace_add("write", on_font_size_change)
+
+        # UI font size settings
+        ttk.Label(settings_win, text="UI Font Size:").pack(pady=5)
+
+        def on_ui_font_size_change(*args):
+            save_setting("ui_font_size", self.ui_font_size.get())
+            self.apply_ui_font()
+
+        ui_font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
+        ui_font_size_spinbox.pack(fill=tk.X, padx=20)
+        self.ui_font_size.trace_add("write", on_ui_font_size_change)
 
     def export_chat(self):
         if not self.session_id:
@@ -812,11 +926,11 @@ class ChatApp(tk.Tk):
         for role, content in messages:
             conversation += f"{role.title()}: {content}\n"
 
-        prompt = f"current chat session name is '{self.session_name}'. Summarize this session in 5 words or less only change it when a significant shift occurs:\n\n{conversation}"
+        prompt = f"The current chat session name is '{self.session_name}'. Summarize the following conversation in 5 words or less. This summary will be used as the new session name. Only change the name if a significant topic shift occurs. Do not use quotes in the summary.\n\nConversation:\n{conversation}"
 
         try:
             messages_for_summary = [
-                {"role": "system", "content": "You are a helpful assistant that summarizes chat sessions."},
+                {"role": "system", "content": "You are a helpful assistant that summarizes chat sessions for use as a new session name."},
                 {"role": "user", "content": prompt}
             ]
             
@@ -825,11 +939,10 @@ class ChatApp(tk.Tk):
                 self.session_name, 
                 messages_for_summary, 
                 "gpt-3.5-turbo", 
-                self.chat_history, 
                 self.session_id, 
                 widget=None,
                 save_message_to_db=False
-            ).strip()
+            ).strip().strip('"') # Strip quotes from the response
 
             if new_name and new_name != self.session_name and len(new_name.split()) <= 5:
                 current_selection_index = self.session_list.curselection()
@@ -879,7 +992,7 @@ class ChatApp(tk.Tk):
         self.update_idletasks()
 
         try:
-            assistant_full_reply = send_to_api(self.session_name, message_blocks, self.model_var.get(), self.chat_history, self.session_id, widget=self.chat_history, save_message_to_db=True)
+            assistant_full_reply = send_to_api(self.session_name, message_blocks, self.model_var.get(), self.session_id, widget=self.chat_history, save_message_to_db=True)
             if assistant_full_reply: # Only summarize if there was a response
                 self.summarize_and_rename_session()
         except requests.exceptions.RequestException as e:
@@ -919,6 +1032,72 @@ class ChatApp(tk.Tk):
                 self.history_index = len(self.message_history)
                 self.input_box.delete("1.0", tk.END)
         return "break"
+
+    def increase_font_size(self, event=None):
+        print("Increase font size called")
+        new_size = self.chat_font_size.get() + 1
+        if 8 <= new_size <= 72:
+            self.chat_font_size.set(new_size)
+            save_setting("chat_font_size", new_size)
+            self.apply_font()
+
+    def decrease_font_size(self, event=None):
+        print("Decrease font size called")
+        new_size = self.chat_font_size.get() - 1
+        if 8 <= new_size <= 72:
+            self.chat_font_size.set(new_size)
+            save_setting("chat_font_size", new_size)
+            self.apply_font()
+
+    def find_dialog(self, event=None):
+        self.search_frame.grid(row=1, column=0, sticky="ew", pady=2)
+        self.input_container_frame.grid_remove()
+        self.search_entry.focus_set()
+
+    def find_next(self, event=None):
+        self.chat_history.tag_remove('found', '1.0', tk.END)
+        query = self.search_entry.get()
+        if not query:
+            return
+
+        self.search_matches = []
+        start_pos = '1.0'
+        while True:
+            start_pos = self.chat_history.search(query, start_pos, stopindex=tk.END, nocase=True)
+            if not start_pos:
+                break
+            end_pos = f"{start_pos}+{len(query)}c"
+            self.search_matches.append(start_pos)
+            self.chat_history.tag_add('found', start_pos, end_pos)
+            start_pos = end_pos
+        
+        self.chat_history.tag_config('found', background='yellow', foreground='black')
+
+        if self.search_matches:
+            self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
+            self.chat_history.see(self.search_matches[self.current_match_index])
+            self.chat_history.tag_remove('current_found', '1.0', tk.END)
+            self.chat_history.tag_add('current_found', self.search_matches[self.current_match_index], f"{self.search_matches[self.current_match_index]}+{len(query)}c")
+            self.chat_history.tag_config('current_found', background='orange', foreground='black')
+
+
+    def find_prev(self, event=None):
+        query = self.search_entry.get()
+        if not query or not self.search_matches:
+            return
+
+        self.current_match_index = (self.current_match_index - 1) % len(self.search_matches)
+        self.chat_history.see(self.search_matches[self.current_match_index])
+        self.chat_history.tag_remove('current_found', '1.0', tk.END)
+        self.chat_history.tag_add('current_found', self.search_matches[self.current_match_index], f"{self.search_matches[self.current_match_index]}+{len(query)}c")
+
+
+    def hide_search(self, event=None):
+        self.chat_history.tag_remove('found', '1.0', tk.END)
+        self.chat_history.tag_remove('current_found', '1.0', tk.END)
+        self.search_frame.grid_remove()
+        self.input_container_frame.grid()
+        self.input_box.focus_set()
 
 if __name__ == "__main__":
     app = ChatApp()
