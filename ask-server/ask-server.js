@@ -31,25 +31,15 @@ app.use((req, res, next) => {
 app.post('/chat', async (req, res) => {
   const {
     model = 'gpt-3.5-turbo',
-    system = null,
-    prompt = '',
-    ai = '',
+    messages = [],
     stream = false
   } = req.body
 
-  if (!prompt && !ai) {
-    return res.status(400).json({ error: 'Missing both prompt and ai content' })
+  if (messages.length === 0) {
+    return res.status(400).json({ error: 'Missing messages content' })
   }
 
-  const messages = []
   console.log("Incoming request body:", req.body);
-
-  if (system) {
-    messages.push({ role: 'system', content: system.trim() })
-  }
-
-  const userContent = prompt ? `${prompt.trim()}\n\n${ai.trim()}` : ai.trim()
-  messages.push({ role: 'user', content: userContent })
 
   const openaiPayload = {
     model,
