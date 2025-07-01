@@ -869,18 +869,17 @@ class ChatApp(tk.Tk):
             # Style configuration
             s.configure("Dark.TFrame", background="#2b2b2b")
             s.configure("Dark.TLabel", background="#2b2b2b", foreground="white")
-            s.configure("Dark.TButton", background="#4f5254", foreground="white")
+            
+            # Custom button styling for Windows dark mode
+            if os.name == 'nt':
+                img = tk.PhotoImage(file='transparent.png')
+                s.element_create('Dark.TButton.photo', 'image', img, sticky='ew')
+                s.layout('Dark.TButton', [('Dark.TButton.photo', {'children': [('Button.padding', {'children': [('Button.label', {'side': 'left', 'expand': 1})]})]})])
+
+            s.configure("Dark.TButton", background="#4f5254", foreground="white", anchor="center")
             s.map("Dark.TButton", background=[('active', '#6f7274'), ('!disabled', '#4f5254')], foreground=[('!disabled', 'white')])
             s.configure("Dark.Treeview", background="#3c3f41", foreground="white", fieldbackground="#3c3f41")
             s.map("Dark.Treeview", background=[('selected', '#4f5254')], foreground=[('selected', 'white')])
-            if os.name == 'nt':
-                s.layout("Dark.TButton", [
-                    ("Button.border", {"children":
-                        [("Button.padding", {"children":
-                            [("Button.label", {"side": "left", "expand": 1})]
-                        })]
-                    })
-                ])
         else: # Light mode
             self.configure(bg="#f0f0f0")
             # Left panel

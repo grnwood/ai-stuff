@@ -1,3 +1,5 @@
 .env
 ask-server/chat-sessions.db
+chat-sessions.db
+venv
 
