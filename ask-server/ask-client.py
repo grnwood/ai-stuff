@@ -167,6 +167,7 @@ def delete_session_and_messages(session_id):
 # --- API ---
 def stream_and_process_response(resp, widget):
     assistant_full_reply = ""
+    buffer = ""
     for line in resp.iter_lines():
         if line:
             decoded_line = line.decode('utf-8')
@@ -181,7 +182,11 @@ def stream_and_process_response(resp, widget):
                         if 'content' in delta:
                             content_chunk = delta['content']
                             assistant_full_reply += content_chunk
+                            buffer += content_chunk
                             if widget:
+                                # This is a simplified approach for real-time rendering.
+                                # For a more robust solution, you might need to parse the buffer
+                                # and apply tags incrementally.
                                 widget.configure(state="normal")
                                 widget.insert(tk.END, content_chunk)
                                 widget.configure(state="disabled")
@@ -189,6 +194,12 @@ def stream_and_process_response(resp, widget):
                                 widget.update_idletasks()
                 except json.JSONDecodeError:
                     print(f"Skipping non-JSON line: {decoded_line}")
+    
+    # Final rendering after the stream is complete
+    if widget:
+        # This is where you could re-render the whole response for accuracy
+        pass
+
     return assistant_full_reply
 
 def send_to_api(session_name, messages, model, current_session_id, widget=None, save_message_to_db=True):
@@ -220,23 +231,140 @@ def send_to_api(session_name, messages, model, current_session_id, widget=None, 
     return assistant_full_reply
 
 
-# --- Markdown to Plaintext Converter ---
-class HTMLToText(HTMLParser):
-    def __init__(self):
+class HTMLToTkinter(HTMLParser):
+    def __init__(self, text_widget):
         super().__init__()
-        self.text = ""
+        self.widget = text_widget
+        self.tag_stack = []
+        self.list_counter = 0
+        self.in_pre = False
+
+        # Table handling
+        self.in_table = False
+        self.table_data = []
+        self.current_row = []
+        self.current_cell = ""
+
+    def handle_starttag(self, tag, attrs):
+        self.tag_stack.append(tag)
+
+        if tag == 'pre':
+            self.in_pre = True
+            return
+
+        if tag == 'table':
+            self.in_table = True
+            self.table_data = []
+            return
+
+        if self.in_table:
+            if tag == 'tr':
+                self.current_row = []
+            elif tag in ['td', 'th']:
+                self.current_cell = ""
+            return
+
+        if tag == 'ol':
+            self.list_counter = 1
+        elif tag == 'li':
+            if self.list_counter > 0:
+                self.widget.insert(tk.END, f"{self.list_counter}. ", ("li",))
+                self.list_counter += 1
+            else:
+                self.widget.insert(tk.END, "• ", ("li",))
+        elif tag == 'br':
+            self.widget.insert(tk.END, "\n")
+        elif tag == 'hr':
+            self.widget.insert(tk.END, "\n" + "—"*20 + "\n")
+
+    def handle_endtag(self, tag):
+        if self.tag_stack:
+            self.tag_stack.pop()
+
+        if tag == 'pre':
+            self.in_pre = False
+            self.widget.insert(tk.END, "\n")
+            return
+
+        if tag == 'table':
+            self.in_table = False
+            self.format_and_insert_table()
+            return
+
+        if self.in_table:
+            if tag == 'tr':
+                self.table_data.append(self.current_row)
+            elif tag in ['td', 'th']:
+                self.current_row.append(self.current_cell.strip())
+            return
+
+        if tag == 'ol':
+            self.list_counter = 0
+
+        if tag in ["p", "h1", "h2", "h3", "ul", "ol", "pre", "div"]:
+            self.widget.insert(tk.END, "\n")
+        elif tag == 'li':
+             self.widget.insert(tk.END, "\n")
+
 
     def handle_data(self, data):
-        self.text += data
+        if self.in_pre:
+            self.widget.insert(tk.END, data, ("pre",))
+            return
+            
+        if self.in_table:
+            self.current_cell += data
+            return
 
-    def get_text(self):
-        return self.text.strip()
+        # Non-table content
+        tags = tuple(self.tag_stack)
+        tkinter_tags = []
+        for t in tags:
+            if t in ["h1", "h2", "h3", "p", "li", "pre", "code"]:
+                tkinter_tags.append(t)
+            elif t in ["b", "strong"]:
+                tkinter_tags.append("bold")
+            elif t in ["i", "em"]:
+                tkinter_tags.append("italic")
 
-def markdown_to_text(md):
-    html = markdown(md)
-    parser = HTMLToText()
+        self.widget.insert(tk.END, data, tuple(tkinter_tags))
+
+    def format_and_insert_table(self):
+        if not self.table_data:
+            return
+
+        num_columns = max(len(row) for row in self.table_data) if self.table_data else 0
+        if num_columns == 0:
+            return
+
+        col_widths = [0] * num_columns
+        for row in self.table_data:
+            for i, cell in enumerate(row):
+                if i < num_columns:
+                    if len(cell) > col_widths[i]:
+                        col_widths[i] = len(cell)
+
+        builder = []
+        is_header = True
+        for row in self.table_data:
+            padded_row = row + [''] * (num_columns - len(row))
+            line = "| " + " | ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(padded_row)) + " |"
+            builder.append(line)
+            if is_header and len(self.table_data) > 1:
+                separator = "|-" + "-|- ".join("-" * col_widths[i] for i in range(num_columns)) + "-|"
+                builder.append(separator)
+                is_header = False
+        
+        formatted_table = "\n".join(builder) + "\n"
+        self.widget.insert(tk.END, formatted_table, ("table",))
+
+def render_markdown_in_widget(widget, md):
+    # Using 'fenced_code' for better code block handling
+    html = markdown(md, extensions=['tables', 'fenced_code'])
+    parser = HTMLToTkinter(widget)
     parser.feed(html)
-    return parser.get_text()
+
+
 
 class ToolTip:
     def __init__(self, widget):
@@ -574,6 +702,17 @@ class ChatApp(tk.Tk):
         self.chat_history.tag_bind("copy_link", "<Button-1>", self.copy_message_from_link)
         self.chat_history.tag_bind("copy_link", "<Enter>", lambda e: self.chat_history.config(cursor="hand2"))
         self.chat_history.tag_bind("copy_link", "<Leave>", lambda e: self.chat_history.config(cursor=""))
+
+        self.chat_history.tag_config("h1", font=("TkDefaultFont", 16, "bold"), spacing3=5)
+        self.chat_history.tag_config("h2", font=("TkDefaultFont", 14, "bold"), spacing3=5)
+        self.chat_history.tag_config("h3", font=("TkDefaultFont", 12, "bold"), spacing3=5)
+        self.chat_history.tag_config("bold", font=("TkDefaultFont", 10, "bold"))
+        self.chat_history.tag_config("italic", font=("TkDefaultFont", 10, "italic"))
+        self.chat_history.tag_config("code", font=("Courier", 10), background="#f0f0f0")
+        self.chat_history.tag_config("pre", font=("Courier", 10), background="#f0f0f0", lmargin1=10, lmargin2=10, spacing1=5, spacing3=5)
+        self.chat_history.tag_config("p", spacing1=2, spacing3=2)
+        self.chat_history.tag_config("li", lmargin1=20, lmargin2=20)
+        self.chat_history.tag_config("table", font=("Courier", 10), lmargin1=10, lmargin2=10)
 
         self.chat_history_menu = tk.Menu(self.chat_history, tearoff=0)
         self.chat_history_menu.add_command(label="Copy", command=self.copy_chat_selection)
@@ -1289,15 +1428,15 @@ class ChatApp(tk.Tk):
         self.chat_history.delete("1.0", tk.END)
         messages = get_messages(self.session_id)
         for i, (role, content) in enumerate(messages):
-            plain_content = markdown_to_text(content)
             if role == 'user':
                 self.chat_history.insert(tk.END, f"User:\n", ("user_tag", "bold"))
-                self.chat_history.insert(tk.END, f"{plain_content}\n\n")
+                render_markdown_in_widget(self.chat_history, content)
+                self.chat_history.insert(tk.END, "\n\n")
             elif role == 'assistant':
                 self.chat_history.insert(tk.END, f"Assistant:\n", ("assistant_tag", "bold"))
                 
                 message_start_index = self.chat_history.index(tk.INSERT)
-                self.chat_history.insert(tk.END, f"{plain_content}\n")
+                render_markdown_in_widget(self.chat_history, content)
                 message_end_index = self.chat_history.index(tk.INSERT)
 
                 # Unique tags for each message body and its copy link
