@@ -283,7 +283,7 @@ class HTMLToTkinter(HTMLParser):
 
         if tag == 'pre':
             self.in_pre = False
-            self.widget.insert(tk.END)
+            self.widget.insert(tk.END, "\n")
             return
 
         if tag == 'table':
@@ -300,11 +300,17 @@ class HTMLToTkinter(HTMLParser):
 
         if tag == 'ol':
             self.list_counter = 0
+            self.widget.insert(tk.END, "\n")  # Only one newline after the whole list
 
-        if tag in ["p", "h1", "h2", "h3", "ul", "ol", "pre", "div"]:
+        elif tag == 'ul':
+            self.widget.insert(tk.END, "\n")  # Only one newline after the whole list
+
+        # Remove or comment out this line for li:
+        # elif tag == 'li':
+        #     self.widget.insert(tk.END, "\n")
+
+        if tag in ["h1", "h2", "h3", "pre"]:
             self.widget.insert(tk.END, "\n")
-        elif tag == 'li':
-            self.widget.insert(tk.END, "")
 
 
     def handle_data(self, data):
