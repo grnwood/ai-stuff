@@ -314,6 +314,15 @@ class HTMLToTkinter(HTMLParser):
 
 
     def handle_data(self, data):
+         # Ignore whitespace-only data inside lists
+        if self.tag_stack and self.tag_stack[-1] in ("li", "ol", "ul") and data.strip() == "":
+            return
+        if self.in_pre:
+            self.widget.insert(tk.END, data, ("pre",))
+            return
+        if self.in_table:
+            self.current_cell += data
+            return
         if self.in_pre:
             self.widget.insert(tk.END, data, ("pre",))
             return
