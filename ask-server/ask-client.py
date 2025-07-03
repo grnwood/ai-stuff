@@ -283,7 +283,7 @@ class HTMLToTkinter(HTMLParser):
 
         if tag == 'pre':
             self.in_pre = False
-            self.widget.insert(tk.END, "\n")
+            self.widget.insert(tk.END)
             return
 
         if tag == 'table':
@@ -302,9 +302,9 @@ class HTMLToTkinter(HTMLParser):
             self.list_counter = 0
 
         if tag in ["p", "h1", "h2", "h3", "ul", "ol", "pre", "div"]:
-            self.widget.insert(tk.END, "\n")
+            self.widget.insert(tk.END, "")
         elif tag == 'li':
-             self.widget.insert(tk.END, "\n")
+            self.widget.insert(tk.END, "")
 
 
     def handle_data(self, data):
@@ -621,7 +621,7 @@ class ChatApp(tk.Tk):
 
         # Main PanedWindow (Left and Right Panels)
         self.main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        self.main_paned_window.grid(row=0, column=0, sticky="nsew", pady=10)
+        self.main_paned_window.grid(row=0, column=0, sticky="nsew", pady=0)
 
         # Left PanedWindow (Session List and Main Chat Area)
         self.left_paned_window = ttk.PanedWindow(self.main_paned_window, orient=tk.HORIZONTAL)
@@ -678,7 +678,7 @@ class ChatApp(tk.Tk):
         self.main_frame.rowconfigure(0, weight=1)
         self.main_frame.columnconfigure(0, weight=1)
 
-        self.chat_history = ScrolledText(self.main_frame, wrap=tk.WORD, padx=10)
+        self.chat_history = ScrolledText(self.main_frame, wrap=tk.WORD, padx=2, pady=2)
         self.chat_history.grid(row=0, column=0, sticky="nsew")
         self.chat_history.bind("<KeyPress>", lambda e: "break")
 
@@ -703,16 +703,20 @@ class ChatApp(tk.Tk):
         self.chat_history.tag_bind("copy_link", "<Enter>", lambda e: self.chat_history.config(cursor="hand2"))
         self.chat_history.tag_bind("copy_link", "<Leave>", lambda e: self.chat_history.config(cursor=""))
 
-        self.chat_history.tag_config("h1", font=("TkDefaultFont", 16, "bold"), spacing3=5)
-        self.chat_history.tag_config("h2", font=("TkDefaultFont", 14, "bold"), spacing3=5)
-        self.chat_history.tag_config("h3", font=("TkDefaultFont", 12, "bold"), spacing3=5)
-        self.chat_history.tag_config("bold", font=("TkDefaultFont", 10, "bold"))
-        self.chat_history.tag_config("italic", font=("TkDefaultFont", 10, "italic"))
-        self.chat_history.tag_config("code", font=("Courier", 10), background="#f0f0f0")
-        self.chat_history.tag_config("pre", font=("Courier", 10), background="#f0f0f0", lmargin1=10, lmargin2=10, spacing1=5, spacing3=5)
-        self.chat_history.tag_config("p", spacing1=2, spacing3=2)
+        self.chat_history.tag_config("copy_md_link", foreground="blue", underline=True)
+        self.chat_history.tag_bind("copy_md_link", "<Button-1>", self.copy_md_message_from_link)
+        self.chat_history.tag_bind("copy_md_link", "<Enter>", lambda e: self.chat_history.config(cursor="hand2"))
+        self.chat_history.tag_bind("copy_md_link", "<Leave>", lambda e: self.chat_history.config(cursor=""))
+
+        self.chat_history.tag_config("h1", font=("TkDefaultFont", 14, "bold"), spacing1=0, spacing3=0)
+        self.chat_history.tag_config("h2", font=("TkDefaultFont", 12, "bold"), spacing1=0, spacing3=0)
+        self.chat_history.tag_config("h3", font=("TkDefaultFont", 11, "bold"), spacing1=0, spacing3=0)
+        self.chat_history.tag_config("p", spacing1=0, spacing3=0)
+        self.chat_history.tag_config("li", lmargin1=10, lmargin2=10, spacing1=0, spacing3=0)
+        self.chat_history.tag_config("pre", font=("Courier", 10), background="#f0f0f0", lmargin1=10, lmargin2=10, spacing1=0, spacing3=0)
+        self.chat_history.tag_config("p", spacing1=0, spacing3=0)
         self.chat_history.tag_config("li", lmargin1=20, lmargin2=20)
-        self.chat_history.tag_config("table", font=("Courier", 10), lmargin1=10, lmargin2=10)
+        self.chat_history.tag_config("li", lmargin1=10, lmargin2=10, spacing1=0, spacing3=0)
 
         self.chat_history_menu = tk.Menu(self.chat_history, tearoff=0)
         self.chat_history_menu.add_command(label="Copy", command=self.copy_chat_selection)
@@ -784,8 +788,8 @@ class ChatApp(tk.Tk):
         self.input_box = tk.Text(self.input_container_frame, height=5, wrap=tk.WORD)
         self.input_box.grid(row=0, column=0, sticky="ew")
         self.input_box.bind("<Control-Return>", self.send_message)
-        self.input_box.bind("<Up>", self.history_up)
-        self.input_box.bind("<Down>", self.history_down)
+        self.input_box.bind("<Alt-Up>", self.history_up)
+        self.input_box.bind("<Alt-Down>", self.history_down)
 
         self.send_button = ttk.Button(self.input_container_frame, text="Send", command=self.send_message)
         self.send_button.grid(row=0, column=1, sticky="e")
@@ -1274,6 +1278,25 @@ class ChatApp(tk.Tk):
         except Exception as e:
             print(f"Error copying message: {e}")
 
+    def copy_md_message_from_link(self, event):
+        try:
+            index = self.chat_history.index(f"@{event.x},{event.y}")
+            tags_at_index = self.chat_history.tag_names(index)
+            copy_md_link_tag = None
+            for tag in tags_at_index:
+                if tag.startswith("copy_md_link_for_"):
+                    copy_md_link_tag = tag
+                    break
+            if copy_md_link_tag and hasattr(self, "_assistant_md_map"):
+                md_content = self._assistant_md_map.get(copy_md_link_tag, "")
+                self.clipboard_clear()
+                self.clipboard_append(md_content.strip())
+                self.show_status_message("Markdown copied to clipboard!")
+        except tk.TclError:
+            pass
+        except Exception as e:
+            print(f"Error copying markdown: {e}")
+            
     def show_chat_context_menu(self, event):
         if self.chat_history.tag_ranges("sel"):
             self.selection_context_menu.post(event.x_root, event.y_root)
@@ -1430,7 +1453,7 @@ class ChatApp(tk.Tk):
             if role == 'user':
                 self.chat_history.insert(tk.END, f"User:\n", ("user_tag", "bold"))
                 render_markdown_in_widget(self.chat_history, content)
-                self.chat_history.insert(tk.END, "\n\n")
+                #self.chat_history.insert(tk.END, "\n")
             elif role == 'assistant':
                 self.chat_history.insert(tk.END, f"Assistant:\n", ("assistant_tag", "bold"))
                 
@@ -1441,11 +1464,21 @@ class ChatApp(tk.Tk):
                 # Unique tags for each message body and its copy link
                 message_body_tag = f"assistant_message_body_{i}"
                 copy_link_tag = f"copy_link_for_{message_body_tag}"
+                copy_md_link_tag = f"copy_md_link_for_{message_body_tag}"
+
 
                 self.chat_history.tag_add(message_body_tag, message_start_index, message_end_index)
-                
-                self.chat_history.insert(tk.END, "Copy", ("copy_link", copy_link_tag))
+                self.chat_history.tag_config("hr", foreground="#888888", font=("TkDefaultFont", 8))
+                # --- Add horizontal line before the Copy link ---
+                self.chat_history.insert(tk.END, "\n" + "─" * 40 + "\n", ("hr",))
+                # --- End horizontal line ---
+                self.chat_history.insert(tk.END, "Copy Text | ", ("copy_link", copy_link_tag))
+                self.chat_history.insert(tk.END, "Copy (md)", ("copy_md_link", copy_md_link_tag))
                 self.chat_history.insert(tk.END, "\n\n")
+                 # Store the markdown content for this message for later copying
+                if not hasattr(self, "_assistant_md_map"):
+                    self._assistant_md_map = {}
+                self._assistant_md_map[copy_md_link_tag] = content
 
         self.chat_history.see(tk.END)
         self.chat_history.configure(state="disabled")
