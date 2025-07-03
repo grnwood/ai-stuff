@@ -267,7 +267,8 @@ class HTMLToTkinter(HTMLParser):
         if tag == 'ol':
             self.list_counter = 1
         elif tag == 'li':
-            if self.list_counter > 0:
+            # Check if we're inside an <ol>
+            if 'ol' in self.tag_stack:
                 self.widget.insert(tk.END, f"{self.list_counter}. ", ("li",))
                 self.list_counter += 1
             else:
@@ -278,6 +279,11 @@ class HTMLToTkinter(HTMLParser):
             self.widget.insert(tk.END, "\n" + "—"*20 + "\n")
 
     def handle_endtag(self, tag):
+        # ... use self.tag_stack before popping ...
+        if tag == 'ol':
+            self.list_counter = 0
+            self.widget.insert(tk.END, "\n")
+    
         if self.tag_stack:
             self.tag_stack.pop()
 
@@ -309,7 +315,7 @@ class HTMLToTkinter(HTMLParser):
         # elif tag == 'li':
         #     self.widget.insert(tk.END, "\n")
 
-        if tag in ["h1", "h2", "h3", "pre"]:
+        if tag in ["h1", "h2", "h3"]:
             self.widget.insert(tk.END, "\n")
 
 
