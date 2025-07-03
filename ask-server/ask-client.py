@@ -302,7 +302,7 @@ class HTMLToTkinter(HTMLParser):
             self.list_counter = 0
 
         if tag in ["p", "h1", "h2", "h3", "ul", "ol", "pre", "div"]:
-            self.widget.insert(tk.END, "")
+            self.widget.insert(tk.END, "\n")
         elif tag == 'li':
             self.widget.insert(tk.END, "")
 
