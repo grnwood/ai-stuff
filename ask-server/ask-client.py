@@ -311,9 +311,9 @@ class HTMLToTkinter(HTMLParser):
         elif tag == 'ul':
             self.widget.insert(tk.END, "\n")  # Only one newline after the whole list
 
-        # Remove or comment out this line for li:
-        # elif tag == 'li':
-        #     self.widget.insert(tk.END, "\n")
+        # Add this for li:
+        elif tag == 'li':
+            self.widget.insert(tk.END, "\n")
 
         if tag in ["h1", "h2", "h3", "pre"]:
             self.widget.insert(tk.END, "\n")
