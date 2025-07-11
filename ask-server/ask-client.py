@@ -442,6 +442,7 @@ class ChatApp(tk.Tk):
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
         self.chat_font_size = tk.IntVar(value=get_setting("chat_font_size", 10))
+        self.ui_font = tk.StringVar(value=get_setting("ui_font", "TkDefaultFont"))
         self.ui_font_size = tk.IntVar(value=get_setting("ui_font_size", 12))
 
         self.chat_icon = tk.PhotoImage(file="comment-alt.png")
@@ -674,6 +675,7 @@ class ChatApp(tk.Tk):
         self.session_tree.bind("<B1-Motion>", self.move_item)
         self.session_tree.bind("<ButtonPress-1>", self.on_button_press)
         self.session_tree.bind("<ButtonRelease-1>", self.on_button_release)
+        self.session_tree.bind("<F2>", lambda e: self.rename_session())
 
         self.session_context_menu = tk.Menu(self.session_tree, tearoff=0)
         self.session_context_menu.add_command(label="New Chat", command=self.new_chat_in_folder)
@@ -872,6 +874,8 @@ class ChatApp(tk.Tk):
         theme = self.theme.get()
         s = ttk.Style()
         if theme == "dark":
+            if os.name == 'nt':
+                s.theme_use('clam')
             self.configure(bg="#2b2b2b")
             # Left panel
             self.left_frame.configure(style="Dark.TFrame")
@@ -942,13 +946,14 @@ class ChatApp(tk.Tk):
             self.input_box.configure(font=default_font)
 
     def apply_ui_font(self):
+        ui_font_name = self.ui_font.get()
         ui_font_size = self.ui_font_size.get()
         style = ttk.Style()
-        style.configure("TLabel", font=(None, ui_font_size))
-        style.configure("TButton", font=(None, ui_font_size))
-        style.configure("TCombobox", font=(None, ui_font_size))
-        style.configure("Treeview", font=(None, ui_font_size), rowheight=int(ui_font_size * 2.5))
-        self.system_prompt_text.configure(font=(None, ui_font_size))
+        style.configure("TLabel", font=(ui_font_name, ui_font_size))
+        style.configure("TButton", font=(ui_font_name, ui_font_size))
+        style.configure("TCombobox", font=(ui_font_name, ui_font_size))
+        style.configure("Treeview", font=(ui_font_name, ui_font_size), rowheight=int(ui_font_size * 2.5))
+        self.system_prompt_text.configure(font=(ui_font_name, ui_font_size))
 
     def open_settings(self):
         settings_win = tk.Toplevel(self)
@@ -1022,6 +1027,17 @@ class ChatApp(tk.Tk):
         font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
         font_size_spinbox.pack(fill=tk.X, padx=20)
         self.chat_font_size.trace_add("write", on_font_size_change)
+
+        # UI font settings
+        ttk.Label(settings_win, text="UI Font:").pack(pady=5)
+
+        def on_ui_font_change(*args):
+            save_setting("ui_font", self.ui_font.get())
+            self.apply_ui_font()
+
+        ui_font_dropdown = ttk.Combobox(settings_win, textvariable=self.ui_font, state="readonly", values=font_families)
+        ui_font_dropdown.pack(fill=tk.X, padx=20)
+        self.ui_font.trace_add("write", on_ui_font_change)
 
         # UI font size settings
         ttk.Label(settings_win, text="UI Font Size:").pack(pady=5)
