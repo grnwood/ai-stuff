@@ -1,0 +1,6 @@
+requests
+python-dotenv
+markdown
+pillow
+openai
+selenium
