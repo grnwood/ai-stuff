@@ -9,6 +9,7 @@ from markdown import markdown
 from html.parser import HTMLParser
 from dotenv import load_dotenv
 from tkinter import font
+from PIL import Image
 
 load_dotenv()
 
@@ -901,6 +902,9 @@ class ChatApp(tk.Tk):
             
             # Custom button styling for Windows dark mode
             if os.name == 'nt':
+                if not os.path.isfile('transparent.png'):
+                    img = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
+                    img.save('transparent.png')
                 img = tk.PhotoImage(file='transparent.png')
                 s.element_create('Dark.TButton.photo', 'image', img, sticky='ew')
                 s.layout('Dark.TButton', [('Dark.TButton.photo', {'children': [('Button.padding', {'children': [('Button.label', {'side': 'left', 'expand': 1})]})]})])
