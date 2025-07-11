@@ -809,8 +809,8 @@ class ChatApp(tk.Tk):
         self.input_box = tk.Text(self.input_container_frame, height=5, wrap=tk.WORD)
         self.input_box.grid(row=0, column=0, sticky="ew")
         self.input_box.bind("<Control-Return>", self.send_message)
-        self.input_box.bind("<Up>", self.history_up)
-        self.input_box.bind("<Down>", self.history_down)
+        self.input_box.bind("<Alt-Up>", self.history_up)
+        self.input_box.bind("<Alt-Down>", self.history_down)
 
         self.send_button = ttk.Button(self.input_container_frame, text="Send", command=self.send_message)
         self.send_button.grid(row=0, column=1, sticky="e")
