@@ -99,3 +99,5 @@
 
    * 📜 Command History: Cycle through your previous inputs using the up and down
      arrow keys, just like in a terminal.
+   * ⌨️ F2 Hotkey: Press F2 on a selected session to quickly rename it.
+   * 🖋️ UI Font Customization: Choose both the font family and size for all interface elements.
