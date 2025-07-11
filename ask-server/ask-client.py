@@ -582,19 +582,23 @@ class ChatApp(tk.Tk):
             self.new_session(parent_id=parent_id)
 
     def rename_session(self):
-        try:
-            index = self.session_list.curselection()[0]
-            old_name = self.session_list.get(index)
-            session_id = self.get_session_id_by_name(old_name)
+        selection = self.session_tree.selection()
+        if not selection:
+            return
 
-            new_name = tk.simpledialog.askstring("Rename Session", "Enter new session name:", initialvalue=old_name)
-            if new_name and new_name != old_name:
-                update_session_name(session_id, new_name)
-                self.load_sessions()
-                if self.session_id == session_id:
-                    self.session_name = new_name
-        except IndexError:
-            pass
+        selected_item = selection[0]
+        session_id, _type = self.session_tree.item(selected_item, "values")
+        session_id = int(session_id)
+        old_name = self.session_tree.item(selected_item, "text")
+
+        new_name = tk.simpledialog.askstring("Rename", "Enter new name:", initialvalue=old_name)
+        if new_name and new_name != old_name:
+            update_session_name(session_id, new_name)
+            self.session_tree.item(selected_item, text=new_name)
+
+            if self.session_id == session_id:
+                self.session_name = new_name
+                self.title(f"{APP_NAME} - {self.session_name}")
 
     def delete_session(self):
         selection = self.session_tree.selection()
