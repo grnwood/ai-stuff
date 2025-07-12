@@ -5,6 +5,7 @@ import requests
 import os
 import json
 import sqlite3
+import argparse
 from markdown import markdown
 from html.parser import HTMLParser
 from dotenv import load_dotenv
@@ -16,7 +17,34 @@ load_dotenv()
 APP_NAME="SlipStreamAI"
 API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
+
+# Default database path. This may be overridden via --db on the command line
+# and can be changed at runtime from the settings window.
 DB_PATH = "chat_sessions.db"
+
+# File used to persist a list of recently opened databases
+RECENT_DB_FILE = "recent_dbs.json"
+RECENT_DBS = []
+
+def load_recent_dbs():
+    """Load the list of recently used database files."""
+    if os.path.exists(RECENT_DB_FILE):
+        try:
+            with open(RECENT_DB_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    return []
+
+def save_recent_dbs(paths):
+    """Persist the list of recently used database files."""
+    try:
+        with open(RECENT_DB_FILE, "w") as f:
+            json.dump(paths, f)
+    except Exception:
+        pass
 
 def get_available_models():
     try:
@@ -465,6 +493,19 @@ class ChatApp(tk.Tk):
         self.current_match_index = -1
         self.drag_item = None
         self.current_input_buffer = ""
+
+    def restart_app_with_db(self, db_path):
+        """Restart the entire application with a new database path."""
+        global DB_PATH, RECENT_DBS
+        if not db_path:
+            return
+        DB_PATH = db_path
+        if db_path in RECENT_DBS:
+            RECENT_DBS.remove(db_path)
+        RECENT_DBS.insert(0, db_path)
+        RECENT_DBS = RECENT_DBS[:5]
+        save_recent_dbs(RECENT_DBS)
+        self.after(100, lambda: os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path))
 
     def on_model_selected(self, event):
         if self.session_id:
@@ -993,6 +1034,47 @@ class ChatApp(tk.Tk):
             for widget in settings_win.winfo_children():
                 if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
                     widget.configure(style="Dark.TLabel")
+
+        # --- Database selection ---
+        ttk.Label(settings_win, text="Chat Database:").pack(pady=5)
+
+        db_var = tk.StringVar(value=DB_PATH)
+
+        def choose_db_file():
+            path = filedialog.askopenfilename(filetypes=[("DB files", "*.db"), ("All files", "*.*")])
+            if path:
+                db_var.set(path)
+
+        db_frame = ttk.Frame(settings_win)
+        db_frame.pack(fill=tk.X, padx=20)
+        db_dropdown = ttk.Combobox(db_frame, textvariable=db_var, state="readonly")
+        db_dropdown['values'] = ['New...'] + RECENT_DBS
+        db_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(db_frame, image=self.folder_icon, command=choose_db_file).pack(side=tk.LEFT, padx=5)
+
+        def on_db_change(*args):
+            selected = db_var.get()
+            if selected == 'New...':
+                new_path = filedialog.asksaveasfilename(
+                    defaultextension='.db',
+                    filetypes=[('DB files', '*.db'), ('All files', '*.*')]
+                )
+                if not new_path:
+                    db_var.set(DB_PATH)
+                    return
+                try:
+                    sqlite3.connect(new_path).close()
+                except Exception as e:
+                    messagebox.showerror('Error', f'Could not create database:\n{e}')
+                    db_var.set(DB_PATH)
+                    return
+                settings_win.destroy()
+                self.restart_app_with_db(new_path)
+            elif selected and selected != DB_PATH:
+                settings_win.destroy()
+                self.restart_app_with_db(selected)
+
+        db_var.trace_add("write", on_db_change)
         
         # Theme settings
         ttk.Label(settings_win, text="Theme:").pack(pady=5)
@@ -1755,5 +1837,15 @@ class ChatApp(tk.Tk):
         self.input_box.focus_set()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SlipstreamAI Client")
+    parser.add_argument("--db", default="chat_sessions.db", help="Path to chat database")
+    args = parser.parse_args()
+
+    DB_PATH = args.db
+    RECENT_DBS = load_recent_dbs()
+    if DB_PATH not in RECENT_DBS:
+        RECENT_DBS.insert(0, DB_PATH)
+        save_recent_dbs(RECENT_DBS)
+
     app = ChatApp()
     app.mainloop()
