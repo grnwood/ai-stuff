@@ -985,7 +985,7 @@ class ChatApp(tk.Tk):
     def open_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("Settings")
-        settings_win.geometry("300x300")
+        settings_win.geometry("300x700")
 
         if self.theme.get() == "dark":
             settings_win.configure(bg="#2b2b2b")
