@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog
+from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
 from tkinter.scrolledtext import ScrolledText
 import requests
 import os
@@ -190,7 +190,6 @@ def stream_and_process_response(resp, widget):
                                 # and apply tags incrementally.
                                 widget.configure(state="normal")
                                 widget.insert(tk.END, content_chunk)
-                                widget.configure(state="disabled")
                                 widget.see(tk.END)
                                 widget.update_idletasks()
                 except json.JSONDecodeError:
@@ -218,7 +217,6 @@ def send_to_api(session_name, messages, model, current_session_id, widget=None, 
     if widget:
         widget.configure(state="normal")
         widget.insert(tk.END, "Assistant:\n", ("assistant_tag")) # Start assistant message
-        widget.configure(state="disabled")
         widget.see(tk.END)
         widget.update_idletasks()
 
@@ -445,6 +443,8 @@ class ChatApp(tk.Tk):
         self.chat_font_size = tk.IntVar(value=get_setting("chat_font_size", 10))
         self.ui_font = tk.StringVar(value=get_setting("ui_font", "TkDefaultFont"))
         self.ui_font_size = tk.IntVar(value=get_setting("ui_font_size", 12))
+        self.selection_bg = tk.StringVar(value=get_setting("selection_bg", "#b2d7ff"))
+        self.selection_fg = tk.StringVar(value=get_setting("selection_fg", "black"))
 
         self.chat_icon = tk.PhotoImage(file="comment-alt.png")
         self.folder_icon = tk.PhotoImage(file="folder-open.png")
@@ -454,6 +454,7 @@ class ChatApp(tk.Tk):
         self.apply_theme()
         self.apply_font()
         self.apply_ui_font()
+        self.apply_selection_colors()
         self.load_sessions()
         self.update_input_widgets_state()
 
@@ -635,7 +636,7 @@ class ChatApp(tk.Tk):
             self.session_name = None
             self.chat_history.configure(state="normal")
             self.chat_history.delete("1.0", tk.END)
-            self.chat_history.configure(state="disabled")
+            self.chat_history.configure(state="normal")
             self.update_input_widgets_state()
 
     def build_gui(self):
@@ -706,9 +707,15 @@ class ChatApp(tk.Tk):
         self.main_frame.rowconfigure(0, weight=1)
         self.main_frame.columnconfigure(0, weight=1)
 
-        self.chat_history = ScrolledText(self.main_frame, wrap=tk.WORD, padx=10)
+        self.chat_history = ScrolledText(
+            self.main_frame,
+            wrap=tk.WORD,
+            padx=10,
+            selectbackground=self.selection_bg.get(),
+            selectforeground=self.selection_fg.get()
+        )
         self.chat_history.grid(row=0, column=0, sticky="nsew")
-        self.chat_history.bind("<KeyPress>", lambda e: "break")
+        self.chat_history.bind("<KeyPress>", self.chat_history_keypress)
 
         self.search_frame = ttk.Frame(self.main_frame)
         # self.search_frame.grid(row=1, column=0, sticky="ew", pady=2)
@@ -809,7 +816,13 @@ class ChatApp(tk.Tk):
         self.input_container_frame.grid(row=1, column=0, sticky="ew")
         self.input_container_frame.columnconfigure(0, weight=1)
 
-        self.input_box = tk.Text(self.input_container_frame, height=5, wrap=tk.WORD)
+        self.input_box = tk.Text(
+            self.input_container_frame,
+            height=5,
+            wrap=tk.WORD,
+            selectbackground=self.selection_bg.get(),
+            selectforeground=self.selection_fg.get()
+        )
         self.input_box.grid(row=0, column=0, sticky="ew")
         self.input_box.bind("<Control-Return>", self.send_message)
         self.input_box.bind("<Alt-Up>", self.history_up)
@@ -938,6 +951,8 @@ class ChatApp(tk.Tk):
             s.configure("Treeview", background="white", foreground="black", fieldbackground="white")
             s.map("Treeview", background=[('selected', '#0078d7')], foreground=[('selected', 'white')])
 
+        self.apply_selection_colors()
+
     def apply_font(self):
         font_name = self.chat_font.get()
         font_size = self.chat_font_size.get()
@@ -960,6 +975,12 @@ class ChatApp(tk.Tk):
         style.configure("TCombobox", font=(ui_font_name, ui_font_size))
         style.configure("Treeview", font=(ui_font_name, ui_font_size), rowheight=int(ui_font_size * 2.5))
         self.system_prompt_text.configure(font=(ui_font_name, ui_font_size))
+
+    def apply_selection_colors(self):
+        bg = self.selection_bg.get()
+        fg = self.selection_fg.get()
+        self.chat_history.configure(selectbackground=bg, selectforeground=fg)
+        self.input_box.configure(selectbackground=bg, selectforeground=fg)
 
     def open_settings(self):
         settings_win = tk.Toplevel(self)
@@ -1055,6 +1076,38 @@ class ChatApp(tk.Tk):
         ui_font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
         ui_font_size_spinbox.pack(fill=tk.X, padx=20)
         self.ui_font_size.trace_add("write", on_ui_font_size_change)
+
+        ttk.Label(settings_win, text="Selection Background:").pack(pady=5)
+
+        def choose_sel_bg():
+            color = colorchooser.askcolor(initialcolor=self.selection_bg.get())[1]
+            if color:
+                self.selection_bg.set(color)
+
+        bg_frame = ttk.Frame(settings_win)
+        bg_frame.pack(fill=tk.X, padx=20)
+        ttk.Entry(bg_frame, textvariable=self.selection_bg).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(settings_win, text="Selection Foreground:").pack(pady=5)
+
+        def choose_sel_fg():
+            color = colorchooser.askcolor(initialcolor=self.selection_fg.get())[1]
+            if color:
+                self.selection_fg.set(color)
+
+        fg_frame = ttk.Frame(settings_win)
+        fg_frame.pack(fill=tk.X, padx=20)
+        ttk.Entry(fg_frame, textvariable=self.selection_fg).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).pack(side=tk.LEFT, padx=5)
+
+        def on_selection_color_change(*args):
+            save_setting("selection_bg", self.selection_bg.get())
+            save_setting("selection_fg", self.selection_fg.get())
+            self.apply_selection_colors()
+
+        self.selection_bg.trace_add("write", on_selection_color_change)
+        self.selection_fg.trace_add("write", on_selection_color_change)
 
     def export_chat(self):
         if not self.session_id:
@@ -1203,7 +1256,7 @@ class ChatApp(tk.Tk):
             self.title("SlipstreamAI Client")
             self.chat_history.configure(state="normal")
             self.chat_history.delete("1.0", tk.END)
-            self.chat_history.configure(state="disabled")
+            self.chat_history.configure(state="normal")
             self.update_input_widgets_state()
             return
 
@@ -1398,7 +1451,7 @@ class ChatApp(tk.Tk):
         self.chat_history.configure(state="normal")
         self.chat_history.insert(tk.END, f"User:\n{prompt_content}\n\n", ("user_tag", "bold"))
         self.chat_history.see(tk.END)
-        self.chat_history.configure(state="disabled")
+        self.chat_history.configure(state="normal")
         self.update_idletasks()
 
         try:
@@ -1495,7 +1548,7 @@ class ChatApp(tk.Tk):
                 self.chat_history.insert(tk.END, "\n\n")
 
         self.chat_history.see(tk.END)
-        self.chat_history.configure(state="disabled")
+        self.chat_history.configure(state="normal")
 
     def summarize_and_rename_session(self):
         if not self.session_id or not self.session_name:
@@ -1570,7 +1623,7 @@ class ChatApp(tk.Tk):
         self.chat_history.configure(state="normal")
         self.chat_history.insert(tk.END, f"User:\n{content}\n\n", ("user_tag", "bold"))
         self.chat_history.see(tk.END)
-        self.chat_history.configure(state="disabled")
+        self.chat_history.configure(state="normal")
         self.update_idletasks()
 
         try:
@@ -1621,6 +1674,18 @@ class ChatApp(tk.Tk):
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", self.current_input_buffer)
 
+        return "break"
+
+    def chat_history_keypress(self, event):
+        navigation_keys = {
+            'Up', 'Down', 'Left', 'Right', 'Prior', 'Next', 'Home', 'End'
+        }
+        if event.keysym in navigation_keys:
+            return
+        if event.state & 0x4 and event.keysym.lower() in {'c', 'a'}:
+            return
+        if len(event.char) == 0:
+            return
         return "break"
 
     def increase_font_size(self, event=None):
