@@ -6,6 +6,7 @@ import os
 import json
 import sqlite3
 import argparse
+import sys
 from markdown import markdown
 from html.parser import HTMLParser
 from dotenv import load_dotenv
@@ -1026,7 +1027,7 @@ class ChatApp(tk.Tk):
     def open_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("Settings")
-        settings_win.geometry("300x700")
+        settings_win.geometry("700x700")
 
         if self.theme.get() == "dark":
             settings_win.configure(bg="#2b2b2b")
