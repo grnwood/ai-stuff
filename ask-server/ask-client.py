@@ -985,7 +985,8 @@ class ChatApp(tk.Tk):
     def open_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("Settings")
-        settings_win.geometry("300x300")
+        settings_win.geometry("320x400")
+        settings_win.resizable(False, False)
 
         if self.theme.get() == "dark":
             settings_win.configure(bg="#2b2b2b")
@@ -1077,29 +1078,32 @@ class ChatApp(tk.Tk):
         ui_font_size_spinbox.pack(fill=tk.X, padx=20)
         self.ui_font_size.trace_add("write", on_ui_font_size_change)
 
-        ttk.Label(settings_win, text="Selection Background:").pack(pady=5)
+        color_frame = ttk.LabelFrame(settings_win, text="Selection Colors")
+        color_frame.pack(fill=tk.X, padx=20, pady=10)
+
+        ttk.Label(color_frame, text="Background:").grid(row=0, column=0, sticky="w")
 
         def choose_sel_bg():
             color = colorchooser.askcolor(initialcolor=self.selection_bg.get())[1]
             if color:
                 self.selection_bg.set(color)
 
-        bg_frame = ttk.Frame(settings_win)
-        bg_frame.pack(fill=tk.X, padx=20)
-        ttk.Entry(bg_frame, textvariable=self.selection_bg).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).pack(side=tk.LEFT, padx=5)
+        bg_entry = ttk.Entry(color_frame, textvariable=self.selection_bg)
+        bg_entry.grid(row=0, column=1, sticky="ew")
+        ttk.Button(color_frame, text="Pick", command=choose_sel_bg).grid(row=0, column=2, padx=5)
 
-        ttk.Label(settings_win, text="Selection Foreground:").pack(pady=5)
+        ttk.Label(color_frame, text="Foreground:").grid(row=1, column=0, sticky="w", pady=(5,0))
 
         def choose_sel_fg():
             color = colorchooser.askcolor(initialcolor=self.selection_fg.get())[1]
             if color:
                 self.selection_fg.set(color)
 
-        fg_frame = ttk.Frame(settings_win)
-        fg_frame.pack(fill=tk.X, padx=20)
-        ttk.Entry(fg_frame, textvariable=self.selection_fg).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).pack(side=tk.LEFT, padx=5)
+        fg_entry = ttk.Entry(color_frame, textvariable=self.selection_fg)
+        fg_entry.grid(row=1, column=1, sticky="ew", pady=(5,0))
+        ttk.Button(color_frame, text="Pick", command=choose_sel_fg).grid(row=1, column=2, padx=5, pady=(5,0))
+
+        color_frame.columnconfigure(1, weight=1)
 
         def on_selection_color_change(*args):
             save_setting("selection_bg", self.selection_bg.get())
