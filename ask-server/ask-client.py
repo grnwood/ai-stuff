@@ -63,6 +63,11 @@ def get_available_models():
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS system_prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL UNIQUE,
+                    prompt TEXT NOT NULL
+                )''')
     c.execute('''CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -89,6 +94,28 @@ def init_db():
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )''')
+    conn.commit()
+    conn.close()
+
+def save_system_prompt(title, prompt):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO system_prompts (title, prompt) VALUES (?, ?)", (title, prompt))
+    conn.commit()
+    conn.close()
+
+def get_system_prompts():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, title, prompt FROM system_prompts ORDER BY title")
+    prompts = c.fetchall()
+    conn.close()
+    return prompts
+
+def delete_system_prompt(prompt_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM system_prompts WHERE id = ?", (prompt_id,))
     conn.commit()
     conn.close()
 
@@ -480,6 +507,7 @@ class ChatApp(tk.Tk):
         self.space = tk.PhotoImage(width=5, height=1)
 
         self.build_gui()
+        self.load_system_prompts_to_dropdown()
         self.apply_theme()
         self.apply_font()
         self.apply_ui_font()
@@ -867,8 +895,8 @@ class ChatApp(tk.Tk):
         )
         self.input_box.grid(row=0, column=0, sticky="ew")
         self.input_box.bind("<Control-Return>", self.send_message)
-        self.input_box.bind("<Alt-Up>", self.history_up)
-        self.input_box.bind("<Alt-Down>", self.history_down)
+        self.input_box.bind("<Up>", self.history_up_wrapper)
+        self.input_box.bind("<Down>", self.history_down_wrapper)
 
         self.send_button = ttk.Button(self.input_container_frame, text="Send", command=self.send_message)
         self.send_button.grid(row=0, column=1, sticky="e")
@@ -876,19 +904,31 @@ class ChatApp(tk.Tk):
         # --- Right Panel (System Prompt) ---
         self.right_frame = ttk.Frame(self.main_paned_window, width=250)
         self.right_frame.columnconfigure(0, weight=1)
-        self.right_frame.rowconfigure(2, weight=1)
+        self.right_frame.rowconfigure(4, weight=1)
         
-        self.logo_frame = ttk.Frame(self.right_frame)
-        self.logo_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-        self.logo_frame.columnconfigure(0, weight=1)
+        self.system_prompt_var = tk.StringVar()
+        self.system_prompt_dropdown = ttk.Combobox(self.right_frame, textvariable=self.system_prompt_var, state="readonly")
+        self.system_prompt_dropdown.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.system_prompt_dropdown.bind('<<ComboboxSelected>>', self.on_system_prompt_selected)
 
+        self.system_prompt_title_label = ttk.Label(self.right_frame, text="Title:")
+        self.system_prompt_title_label.grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.system_prompt_title_entry = ttk.Entry(self.right_frame)
+        self.system_prompt_title_entry.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.system_prompt_title_entry.bind("<KeyRelease>", self.on_prompt_modified)
        
         self.system_prompt_label = ttk.Label(self.right_frame, text="System Prompt:")
-        self.system_prompt_label.grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.system_prompt_label.grid(row=3, column=0, sticky="w", padx=5, pady=5)
         
         self.system_prompt_text = ScrolledText(self.right_frame, wrap=tk.WORD, height=10)
-        self.system_prompt_text.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.system_prompt_text.bind("<<Modified>>", self.on_system_prompt_modified)
+        self.system_prompt_text.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
+        self.system_prompt_text.bind("<<Modified>>", self.on_prompt_modified)
+
+        self.save_prompt_button = ttk.Button(self.right_frame, text="Save", command=self.save_current_system_prompt, state="disabled")
+        self.save_prompt_button.grid(row=5, column=0, sticky="ew", padx=5, pady=5)
+
+        self.delete_prompt_button = ttk.Button(self.right_frame, text="Delete", command=self.delete_current_system_prompt)
+        self.delete_prompt_button.grid(row=5, column=1, sticky="ew", padx=5, pady=5)
 
         # --- Toggle Button for Right Panel ---
         style = ttk.Style()
@@ -899,6 +939,61 @@ class ChatApp(tk.Tk):
         # --- Status Bar ---
         self.status_bar = ttk.Label(self, text="", anchor=tk.W)
         self.status_bar.grid(row=1, column=0, sticky="ew")
+
+    def load_system_prompts_to_dropdown(self):
+        self.system_prompts = get_system_prompts()
+        prompt_titles = [p[1] for p in self.system_prompts]
+        self.system_prompt_dropdown['values'] = ["New..."] + prompt_titles
+
+    def on_system_prompt_selected(self, event):
+        selected_title = self.system_prompt_var.get()
+        if selected_title == "New...":
+            self.system_prompt_title_entry.delete(0, tk.END)
+            self.system_prompt_text.delete("1.0", tk.END)
+            self.save_prompt_button.config(state="disabled")
+            return
+
+        for p_id, title, prompt in self.system_prompts:
+            if title == selected_title:
+                self.current_system_prompt_id = p_id
+                self.system_prompt_title_entry.delete(0, tk.END)
+                self.system_prompt_title_entry.insert(0, title)
+                self.system_prompt_text.delete("1.0", tk.END)
+                self.system_prompt_text.insert("1.0", prompt)
+                self.save_prompt_button.config(state="disabled")
+                self.system_prompt_text.edit_modified(False)
+                break
+
+    def on_prompt_modified(self, event=None):
+        self.save_prompt_button.config(state="normal")
+        # For the text widget, we need to reset the modified flag after we've handled it
+        if event and event.widget == self.system_prompt_text:
+            event.widget.edit_modified(False)
+
+    def save_current_system_prompt(self):
+        title = self.system_prompt_title_entry.get()
+        prompt = self.system_prompt_text.get("1.0", tk.END).strip()
+        if not title or not prompt:
+            self.show_status_message("Title and prompt cannot be empty.")
+            return
+
+        save_system_prompt(title, prompt)
+        self.load_system_prompts_to_dropdown()
+        self.system_prompt_var.set(title)
+        self.show_status_message("Prompt saved")
+        self.save_prompt_button.config(state="disabled")
+
+    def delete_current_system_prompt(self):
+        if hasattr(self, 'current_system_prompt_id'):
+            if messagebox.askyesno("Delete System Prompt", "Are you sure you want to delete this system prompt?"):
+                delete_system_prompt(self.current_system_prompt_id)
+                self.load_system_prompts_to_dropdown()
+                self.system_prompt_var.set("New...")
+                self.system_prompt_title_entry.delete(0, tk.END)
+                self.system_prompt_text.delete("1.0", tk.END)
+                del self.current_system_prompt_id
+        else:
+            messagebox.showinfo("Delete System Prompt", "No system prompt selected to delete.")
 
     def toggle_system_prompt(self):
         if self.system_prompt_text.winfo_ismapped():
@@ -915,16 +1010,6 @@ class ChatApp(tk.Tk):
         else:
             self.main_paned_window.add(self.right_frame)
             self.toggle_right_panel_button.config(text=">")
-
-    def on_system_prompt_modified(self, event):
-        if self.session_id:
-            # Use a flag to prevent recursive calls
-            if not hasattr(self, '_system_prompt_updating') or not self._system_prompt_updating:
-                self._system_prompt_updating = True
-                system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
-                update_session_system_prompt(self.session_id, system_prompt)
-                self.system_prompt_text.edit_modified(False) # Reset modified flag
-                self._system_prompt_updating = False
 
     def apply_theme(self):
         theme = self.theme.get()
@@ -1351,12 +1436,9 @@ class ChatApp(tk.Tk):
                 self.model_var.set(model)
                 
                 # Load system prompt
-                self._system_prompt_updating = True # Set flag to prevent saving on load
                 self.system_prompt_text.delete("1.0", tk.END)
                 if system_prompt:
                     self.system_prompt_text.insert("1.0", system_prompt)
-                self.system_prompt_text.edit_modified(False) # Reset modified flag
-                self._system_prompt_updating = False
 
                 self.load_chat_history()
                 self.message_history = get_input_history(self.session_id)
@@ -1608,8 +1690,13 @@ class ChatApp(tk.Tk):
     def load_chat_history(self):
         self.chat_history.configure(state="normal")
         self.chat_history.delete("1.0", tk.END)
+        # Insert anchor at the start of chat
+        self.chat_history.insert(tk.END, "", "start_anchor")
         messages = get_messages(self.session_id)
         for i, (role, content) in enumerate(messages):
+            anchor_name = f"msg_start_{i}"
+            # Insert a newline with the anchor tag so it's a valid index
+            self.chat_history.insert(tk.END, "\n", anchor_name)
             if role == 'user':
                 self.chat_history.insert(tk.END, f"User:\n", ("user_tag", "bold"))
                 render_markdown_in_widget(self.chat_history, content)
@@ -1628,10 +1715,19 @@ class ChatApp(tk.Tk):
                 self.chat_history.tag_add(message_body_tag, message_start_index, message_end_index)
                 
                 self.chat_history.insert(tk.END, "Copy", ("copy_link", copy_link_tag))
+                # Insert 'Start' link styled as hyperlink
+                self.chat_history.tag_config(f"start_link_{i}", foreground="blue", underline=True)
+                self.chat_history.insert(tk.END, " | Start", (f"start_link_{i}",))
+                self.chat_history.tag_bind(f"start_link_{i}", "<Button-1>", lambda e, idx=i: self.chat_history.see(f"msg_start_{idx}.first"))
+                self.chat_history.tag_bind(f"start_link_{i}", "<Enter>", lambda e: self.chat_history.config(cursor="hand2"))
+                self.chat_history.tag_bind(f"start_link_{i}", "<Leave>", lambda e: self.chat_history.config(cursor=""))
                 self.chat_history.insert(tk.END, "\n\n")
 
+        # Add a clickable 'start' link at the top
+        self.chat_history.insert("1.0", "start", ("copy_link", "start_link"))
+        self.chat_history.tag_bind("start_link", "<Button-1>", lambda e: self.chat_history.see("start_anchor.first"))
         self.chat_history.see(tk.END)
-        self.chat_history.configure(state="normal")
+        self.chat_history.configure(state="disabled")
 
     def summarize_and_rename_session(self):
         if not self.session_id or not self.session_name:
@@ -1729,6 +1825,21 @@ class ChatApp(tk.Tk):
             self.load_chat_history()
 
         return "break"
+
+    def history_up_wrapper(self, event=None):
+        # Only trigger history if the cursor is on the first line
+        cursor_line = int(self.input_box.index(tk.INSERT).split('.')[0])
+        if cursor_line == 1:
+            return self.history_up(event)
+        # Otherwise, allow default Up arrow behavior (moving cursor)
+
+    def history_down_wrapper(self, event=None):
+        # Only trigger history if the cursor is on the last line
+        last_line = int(self.input_box.index('end-1c').split('.')[0])
+        cursor_line = int(self.input_box.index(tk.INSERT).split('.')[0])
+        if cursor_line == last_line:
+            return self.history_down(event)
+        # Otherwise, allow default Down arrow behavior (moving cursor)
 
     def history_up(self, event=None):
         if not self.message_history:
@@ -1836,6 +1947,7 @@ class ChatApp(tk.Tk):
         self.search_frame.grid_remove()
         self.input_container_frame.grid()
         self.input_box.focus_set()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SlipstreamAI Client")
