@@ -558,51 +558,81 @@ class ChatApp(tk.Tk):
 
     def on_button_press(self, event):
         self.drag_item = self.session_tree.identify_row(event.y)
+        if self.drag_item:
+            self.session_tree.item(self.drag_item, tags="drag_item")
 
     def on_button_release(self, event):
         if not self.drag_item:
             return
             
-        item = self.session_tree.identify_row(event.y)
+        item_under_mouse = self.session_tree.identify_row(event.y)
         
-        if item and item != self.drag_item:
-            if self.session_tree.item(item, "values")[1] == 'folder':
-                self.session_tree.move(self.drag_item, item, 'end')
+        if item_under_mouse and item_under_mouse != self.drag_item:
+            if self.session_tree.item(item_under_mouse, "values")[1] == 'folder':
+                # Dropped onto a folder
+                self.session_tree.move(self.drag_item, item_under_mouse, 'end')
                 drag_id = self.session_tree.item(self.drag_item, "values")[0]
-                target_id = self.session_tree.item(item, "values")[0]
+                target_id = self.session_tree.item(item_under_mouse, "values")[0]
                 self.update_item_parent(drag_id, target_id)
             else:
-                parent = self.session_tree.parent(item)
-                index = self.session_tree.index(item)
+                # Dropped between items
+                parent = self.session_tree.parent(item_under_mouse)
+                index = self.session_tree.index(item_under_mouse)
                 self.session_tree.move(self.drag_item, parent, index)
                 drag_id = self.session_tree.item(self.drag_item, "values")[0]
                 parent_id = self.session_tree.item(parent, "values")[0] if parent else None
                 self.update_item_parent(drag_id, parent_id)
-        elif not item:
+        elif not item_under_mouse:
+            # Dropped in empty space, move to root
             self.session_tree.move(self.drag_item, "", "end")
             drag_id = self.session_tree.item(self.drag_item, "values")[0]
             self.update_item_parent(drag_id, None)
 
-        self.drag_item = None
         self.clear_drop_indicator()
+        if self.drag_item:
+            self.session_tree.item(self.drag_item, tags="") # Clear drag indicator
+        self.drag_item = None
 
     def move_item(self, event):
         if not self.drag_item:
             return
         
+        # Clear previous indicators first
         self.clear_drop_indicator()
+        
         item = self.session_tree.identify_row(event.y)
         
-        if item:
+        if item and item != self.drag_item:
             if self.session_tree.item(item, "values")[1] == 'folder':
                 self.session_tree.item(item, tags="drop_target")
-            else:
-                self.session_tree.selection_set(item)
+        elif not item:
+            # Not over any item, indicate root drop
+            style_name = "Dark.RootDrop.Treeview" if self.theme.get() == "dark" else "RootDrop.Treeview"
+            self.session_tree.configure(style=style_name)
 
     def clear_drop_indicator(self):
-        for item in self.session_tree.get_children(""):
+        # Restore original style
+        style_name = "Dark.Treeview" if self.theme.get() == "dark" else "Treeview"
+        self.session_tree.configure(style=style_name)
+        # Clear target tag
+        for item in self.session_tree.tag_has("drop_target"):
             self.session_tree.item(item, tags="")
-            self.clear_tags_recursively(item)
+
+    def create_folder_from_context(self):
+        selection = self.session_tree.selection()
+        parent_id = None
+        if selection:
+            selected_item = selection[0]
+            # If selected item is a folder, new folder goes inside it
+            if self.session_tree.item(selected_item, "values")[1] == 'folder':
+                parent_id = self.session_tree.item(selected_item, "values")[0]
+            else:
+                # If it's a chat, new folder goes alongside it in the same parent
+                parent_item = self.session_tree.parent(selected_item)
+                if parent_item:
+                    parent_id = self.session_tree.item(parent_item, "values")[0]
+        
+        self.new_folder(parent_id=parent_id)
 
     def clear_tags_recursively(self, item):
         for child in self.session_tree.get_children(item):
@@ -749,9 +779,17 @@ class ChatApp(tk.Tk):
         self.session_tree.bind("<ButtonRelease-1>", self.on_button_release)
         self.session_tree.bind("<F2>", lambda e: self.rename_session())
 
+        self.session_tree.tag_configure("drop_target", background="lightblue")
+        self.session_tree.tag_configure("drag_item", background="lightgrey")
+
+        s = ttk.Style()
+        s.configure("RootDrop.Treeview", fieldbackground="lightblue")
+        s.configure("Dark.RootDrop.Treeview", fieldbackground="#004d00", foreground="white")
+        s.map("Dark.RootDrop.Treeview", background=[('selected', '#4f5254')], foreground=[('selected', 'white')])
+
         self.session_context_menu = tk.Menu(self.session_tree, tearoff=0)
         self.session_context_menu.add_command(label="New Chat", command=self.new_chat_in_folder)
-        self.session_context_menu.add_command(label="New Folder", command=self.new_folder)
+        self.session_context_menu.add_command(label="New Folder", command=self.create_folder_from_context)
         self.session_context_menu.add_command(label="Rename", command=self.rename_session)
         self.session_context_menu.add_command(label="Delete", command=self.delete_session)
 
