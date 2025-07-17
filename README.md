@@ -1,5 +1,4 @@
-
-  SlipstreamAI: Your Personal Gateway to OpenAI
+SlipstreamAI: Your Personal Gateway to OpenAI
 
 
   SlipstreamAI is a powerful and flexible software suite designed to provide a
@@ -101,3 +100,51 @@
      arrow keys, just like in a terminal.
    * ⌨️ F2 Hotkey: Press F2 on a selected session to quickly rename it.
    * 🖋️ UI Font Customization: Choose both the font family and size for all interface elements.
+
+---
+
+## Proxy Server Deployment
+
+SlipstreamAI's proxy server (`ask-server.js`) can be deployed locally or on a third-party always-on service for remote access. This flexibility allows you to run the server on your own machine or host it in the cloud for 24/7 availability.
+
+### Local Deployment
+
+To run the proxy server locally:
+
+1. Install Node.js if you haven't already.
+2. Navigate to the `ask-server` directory:
+   ```bash
+   cd ask-server
+   ```
+3. Install dependencies:
+   ```bash
+   npm install
+   ```
+4. Start the server:
+   ```bash
+   node ask-server.js
+   ```
+5. The server will listen on the default port (e.g., 3000). You can configure the port and secret token in the environment variables.
+
+### Deploying on Render.com (Cloud Hosting Example)
+
+You can quickly deploy the proxy server to [Render.com](https://render.com), a popular always-on cloud service. Here are general steps:
+
+1. Create a free account at [render.com](https://render.com).
+2. Click "New Web Service" and connect your GitHub repository containing `ask-server.js`.
+3. Set the build command to:
+   ```bash
+   npm install
+   ```
+4. Set the start command to:
+   ```bash
+   node ask-server.js
+   ```
+5. Add environment variables for your OpenAI API key and secret token (e.g., `OPENAI_API_KEY`, `API_SECRET_TOKEN`).
+6. Choose a region and deploy. Render will provide a public URL for your proxy server.
+
+**Tip:** You can use similar steps for other cloud platforms that support Node.js (such as Heroku, Vercel, or Fly.io).
+
+Once deployed, point your SlipstreamAI client to the new proxy server URL for remote access.
+
+---
