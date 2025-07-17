@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
 
+# RAG imports
+sys.path.append(os.path.dirname(__file__) + '/rag')
+from rag.rag import query_by_chat_id, add_file_to_chat, get_files_for_chat
+
 load_dotenv()
 
 APP_NAME="SlipStreamAI"
@@ -53,7 +57,7 @@ def get_available_models():
         response.raise_for_status()
         models = response.json()
         # The structure from the proxy is already a list of model objects
-        available_models = sorted([model['id'] for model in models['data'] if "gpt" in model['id']])
+        available_models = sorted([model['id'] for model in models['data']]) #if "gpt" in model['id']])
         return available_models
     except Exception as e:
         print(f"Error fetching models: {e}")
@@ -158,7 +162,6 @@ def update_session_model(session_id, model):
     c.execute("UPDATE sessions SET model = ? WHERE id = ?", (model, session_id))
     conn.commit()
     conn.close()
-
 
 
 def update_session_system_prompt(session_id, system_prompt):
@@ -493,6 +496,7 @@ class ChatApp(tk.Tk):
         self.session_name = None
         self.message_history = []
         self.history_index = -1
+        self.chat_files = []
         
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
@@ -743,10 +747,6 @@ class ChatApp(tk.Tk):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        def build_gui(self):
-            self.grid_rowconfigure(0, weight=1)
-            self.grid_columnconfigure(0, weight=1)
-
         # Main PanedWindow (Left and Right Panels)
         self.main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         self.main_paned_window.grid(row=0, column=0, sticky="nsew", pady=10)
@@ -923,6 +923,8 @@ class ChatApp(tk.Tk):
         self.input_container_frame = ttk.Frame(self.main_frame)
         self.input_container_frame.grid(row=1, column=0, sticky="ew")
         self.input_container_frame.columnconfigure(0, weight=1)
+        self.input_container_frame.rowconfigure(0, weight=1)
+        self.input_container_frame.rowconfigure(1, weight=1)
 
         self.input_box = tk.Text(
             self.input_container_frame,
@@ -931,13 +933,17 @@ class ChatApp(tk.Tk):
             selectbackground=self.selection_bg.get(),
             selectforeground=self.selection_fg.get()
         )
-        self.input_box.grid(row=0, column=0, sticky="ew")
+        self.input_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
         self.input_box.bind("<Control-Return>", self.send_message)
         self.input_box.bind("<Up>", self.history_up_wrapper)
         self.input_box.bind("<Down>", self.history_down_wrapper)
 
         self.send_button = ttk.Button(self.input_container_frame, text="Send", command=self.send_message)
-        self.send_button.grid(row=0, column=1, sticky="e")
+        self.send_button.grid(row=0, column=1, sticky="nsew")
+
+        # Files button directly below Send, no gap
+        self.files_button = ttk.Button(self.input_container_frame, text="Files", command=self.open_files_dialog)
+        self.files_button.grid(row=1, column=1, sticky="nsew")
 
         # --- Right Panel (System Prompt) ---
         self.right_frame = ttk.Frame(self.main_paned_window, width=250)
@@ -1154,14 +1160,12 @@ class ChatApp(tk.Tk):
 
         if self.theme.get() == "dark":
             settings_win.configure(bg="#2b2b2b")
-            # Apply dark theme to all widgets in the settings window
             for widget in settings_win.winfo_children():
                 if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
                     widget.configure(style="Dark.TLabel")
 
         # --- Database selection ---
-        ttk.Label(settings_win, text="Chat Database:").pack(pady=5)
-
+        ttk.Label(settings_win, text="Chat Database:").grid(row=0, column=0, sticky="w", pady=5, padx=20)
         db_var = tk.StringVar(value=DB_PATH)
 
         def choose_db_file():
@@ -1170,11 +1174,19 @@ class ChatApp(tk.Tk):
                 db_var.set(path)
 
         db_frame = ttk.Frame(settings_win)
-        db_frame.pack(fill=tk.X, padx=20)
-        db_dropdown = ttk.Combobox(db_frame, textvariable=db_var, state="readonly")
+        db_frame.grid(row=1, column=0, sticky="w", padx=20)
+        # Calculate dropdown width based on longest path
+        all_paths = ['New...'] + RECENT_DBS + [DB_PATH]
+        max_len = max(len(str(p)) for p in all_paths)
+        db_dropdown = ttk.Combobox(db_frame, textvariable=db_var, state="readonly", width=max(30, min(80, max_len)))
         db_dropdown['values'] = ['New...'] + RECENT_DBS
-        db_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(db_frame, image=self.folder_icon, command=choose_db_file).pack(side=tk.LEFT, padx=5)
+        db_dropdown.grid(row=0, column=0, sticky="w")
+        ttk.Button(db_frame, image=self.folder_icon, command=choose_db_file).grid(row=0, column=1, sticky="w", padx=5)
+
+        # Add tooltip to show full path on hover
+        def db_tooltip_text():
+            return db_var.get()
+        create_tooltip(db_dropdown, db_tooltip_text)
 
         def on_db_change(*args):
             selected = db_var.get()
@@ -1198,10 +1210,10 @@ class ChatApp(tk.Tk):
                 settings_win.destroy()
                 self.restart_app_with_db(selected)
 
-        db_var.trace_add("write", on_db_change)
+        db_var.trace_add('write', on_db_change)
         
         # Theme settings
-        ttk.Label(settings_win, text="Theme:").pack(pady=5)
+        ttk.Label(settings_win, text="Theme:").grid(row=2, column=0, sticky="w", pady=5, padx=20)
         
         def on_theme_change():
             save_setting("theme", self.theme.get())
@@ -1220,13 +1232,13 @@ class ChatApp(tk.Tk):
 
 
         light_radio = ttk.Radiobutton(settings_win, text="Light", variable=self.theme, value="light", command=on_theme_change)
-        light_radio.pack(anchor=tk.W, padx=20)
+        light_radio.grid(row=3, column=0, sticky="w", padx=20)
         
         dark_radio = ttk.Radiobutton(settings_win, text="Dark", variable=self.theme, value="dark", command=on_theme_change)
-        dark_radio.pack(anchor=tk.W, padx=20)
+        dark_radio.grid(row=4, column=0, sticky="w", padx=20)
 
         # Default model settings
-        ttk.Label(settings_win, text="Default Model:").pack(pady=5)
+        ttk.Label(settings_win, text="Default Model:").grid(row=5, column=0, sticky="w", pady=5, padx=20)
         
         default_model_var = tk.StringVar(value=get_setting("default_model", "gpt-3.5-turbo"))
         
@@ -1235,11 +1247,11 @@ class ChatApp(tk.Tk):
 
         default_model_dropdown = ttk.Combobox(settings_win, textvariable=default_model_var, state="readonly")
         default_model_dropdown['values'] = get_available_models()
-        default_model_dropdown.pack(fill=tk.X, padx=20)
+        default_model_dropdown.grid(row=6, column=0, sticky="ew", padx=20)
         default_model_var.trace_add("write", on_default_model_change)
 
         # Chat font settings
-        ttk.Label(settings_win, text="Chat Font:").pack(pady=5)
+        ttk.Label(settings_win, text="Chat Font:").grid(row=7, column=0, sticky="w", pady=5, padx=20)
         
         def on_font_change(*args):
             save_setting("chat_font", self.chat_font.get())
@@ -1247,43 +1259,43 @@ class ChatApp(tk.Tk):
 
         font_families = sorted(font.families())
         font_dropdown = ttk.Combobox(settings_win, textvariable=self.chat_font, state="readonly", values=font_families)
-        font_dropdown.pack(fill=tk.X, padx=20)
+        font_dropdown.grid(row=8, column=0, sticky="ew", padx=20)
         self.chat_font.trace_add("write", on_font_change)
 
         # Chat font size settings
-        ttk.Label(settings_win, text="Chat Font Size:").pack(pady=5)
+        ttk.Label(settings_win, text="Chat Font Size:").grid(row=9, column=0, sticky="w", pady=5, padx=20)
 
         def on_font_size_change(*args):
             save_setting("chat_font_size", self.chat_font_size.get())
             self.apply_font()
 
         font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
-        font_size_spinbox.pack(fill=tk.X, padx=20)
+        font_size_spinbox.grid(row=10, column=0, sticky="ew", padx=20)
         self.chat_font_size.trace_add("write", on_font_size_change)
 
         # UI font settings
-        ttk.Label(settings_win, text="UI Font:").pack(pady=5)
+        ttk.Label(settings_win, text="UI Font:").grid(row=11, column=0, sticky="w", pady=5, padx=20)
 
         def on_ui_font_change(*args):
             save_setting("ui_font", self.ui_font.get())
             self.apply_ui_font()
 
         ui_font_dropdown = ttk.Combobox(settings_win, textvariable=self.ui_font, state="readonly", values=font_families)
-        ui_font_dropdown.pack(fill=tk.X, padx=20)
+        ui_font_dropdown.grid(row=12, column=0, sticky="ew", padx=20)
         self.ui_font.trace_add("write", on_ui_font_change)
 
         # UI font size settings
-        ttk.Label(settings_win, text="UI Font Size:").pack(pady=5)
+        ttk.Label(settings_win, text="UI Font Size:").grid(row=13, column=0, sticky="w", pady=5, padx=20)
 
         def on_ui_font_size_change(*args):
             save_setting("ui_font_size", self.ui_font_size.get())
             self.apply_ui_font()
 
         ui_font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
-        ui_font_size_spinbox.pack(fill=tk.X, padx=20)
+        ui_font_size_spinbox.grid(row=14, column=0, sticky="ew", padx=20)
         self.ui_font_size.trace_add("write", on_ui_font_size_change)
 
-        ttk.Label(settings_win, text="Selection Background:").pack(pady=5)
+        ttk.Label(settings_win, text="Selection Background:").grid(row=15, column=0, sticky="w", pady=5, padx=20)
 
         def choose_sel_bg():
             color = colorchooser.askcolor(initialcolor=self.selection_bg.get())[1]
@@ -1291,11 +1303,11 @@ class ChatApp(tk.Tk):
                 self.selection_bg.set(color)
 
         bg_frame = ttk.Frame(settings_win)
-        bg_frame.pack(fill=tk.X, padx=20)
+        bg_frame.grid(row=16, column=0, sticky="ew", padx=20)
         ttk.Entry(bg_frame, textvariable=self.selection_bg).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(settings_win, text="Selection Foreground:").pack(pady=5)
+        ttk.Label(settings_win, text="Selection Foreground:").grid(row=17, column=0, sticky="w", pady=5, padx=20)
 
         def choose_sel_fg():
             color = colorchooser.askcolor(initialcolor=self.selection_fg.get())[1]
@@ -1303,7 +1315,7 @@ class ChatApp(tk.Tk):
                 self.selection_fg.set(color)
 
         fg_frame = ttk.Frame(settings_win)
-        fg_frame.pack(fill=tk.X, padx=20)
+        fg_frame.grid(row=18, column=0, sticky="ew", padx=20)
         ttk.Entry(fg_frame, textvariable=self.selection_fg).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).pack(side=tk.LEFT, padx=5)
 
@@ -1478,6 +1490,7 @@ class ChatApp(tk.Tk):
                 if system_prompt:
                     self.system_prompt_text.insert("1.0", system_prompt)
 
+                self.chat_files = get_files_for_chat(self.session_id)
                 self.load_chat_history()
                 self.message_history = get_input_history(self.session_id)
                 self.history_index = len(self.message_history)
@@ -1485,7 +1498,7 @@ class ChatApp(tk.Tk):
                 self.update_input_widgets_state()
                 break
         else:
-            self.title(f"{APP.NAME}")
+            self.title(f"{APP_NAME}")
             self.update_input_widgets_state()
             return
 
@@ -1514,10 +1527,12 @@ class ChatApp(tk.Tk):
         if self.session_id is None:
             self.input_box.configure(state="disabled")
             self.send_button.configure(state="disabled")
+            self.files_button.configure(state="disabled")
             self.status_bar.config(text="Please select or create a chat session.")
         else:
             self.input_box.configure(state="normal")
             self.send_button.configure(state="normal")
+            self.files_button.configure(state="normal")
             self.status_bar.config(text="")
 
     def new_session(self, parent_id=None):
@@ -1605,8 +1620,8 @@ class ChatApp(tk.Tk):
                 "analyze_sentiment": "Analyze the sentiment and tone of the following text",
                 "analyze_bias": "Identify any assumptions or bias in the following text",
                 "analyze_topic": "Classify the topic of the following text",
-                "ask_generate": "Generate questions from the following text",
-                "ask_what_questions": "What questions can I ask about the following text?",
+                "ask_generate": "Generate questions from this text",
+                "ask_what_questions": "What questions can I ask about this?",
                 "extract_key_points": "Highlight the key points in the following text",
                 "extract_entities": "Extract named entities (people, places, dates, etc.) from the following text",
                 "extract_action_items": "Pull out any action items from the following text",
@@ -1650,25 +1665,25 @@ class ChatApp(tk.Tk):
         if system_prompt:
             message_blocks.insert(0, {"role": "system", "content": system_prompt})
 
-        self.input_box.configure(state="disabled")
-        self.chat_history.configure(state="normal")
-        self.chat_history.insert(tk.END, f"User:\n{prompt_content}\n\n", ("user_tag", "bold"))
-        self.chat_history.see(tk.END)
-        self.chat_history.configure(state="normal")
-        self.update_idletasks()
-
-        try:
-            assistant_full_reply = send_to_api(self.session_name, message_blocks, self.model_var.get(), self.session_id, widget=self.chat_history, save_message_to_db=True)
-            if assistant_full_reply:
-                self.summarize_and_rename_session()
-        except requests.exceptions.RequestException as e:
-            messagebox.showerror("Network Error", f"Could not connect to the server or API: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
-        finally:
-            self.input_box.configure(state="normal")
-            self.input_box.focus_set()
-            
+        # RAG workflow: If chat has associated files, retrieve context from ChromaDB
+        context_block = None
+        if hasattr(self, 'chat_files') and self.chat_files:
+            try:
+                # Embed query and retrieve top-K relevant chunks
+                top_k = 5
+                rag_results = query_by_chat_id(self.session_id, content, n_results=top_k)
+                if rag_results:
+                    context_texts = [r['text'] for r in rag_results]
+                    context_block = '\n---\n'.join(context_texts)
+                    # Prepend context to user message
+                    content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
+                    # Replace user message in message_blocks
+                    for msg in message_blocks:
+                        if msg['role'] == 'user':
+                            msg['content'] = content_with_context
+                            break
+            except Exception as e:
+                self.show_status_message(f"RAG context retrieval failed: {e}")
             item_to_select = self.find_tree_item_by_id(active_session_id)
             if item_to_select:
                 self.session_tree.selection_set(item_to_select)
@@ -1693,7 +1708,7 @@ class ChatApp(tk.Tk):
                 self.session_id, 
                 widget=None, 
                 save_message_to_db=False
-            ).strip().strip('"')
+            ).strip().strip('"') # Strip quotes from the response
 
             if not new_session_name:
                 new_session_name = "New Discussion"
@@ -1813,6 +1828,124 @@ class ChatApp(tk.Tk):
         except Exception as e:
             print(f"Error summarizing session: {e}")
 
+    def close_files_dialog(self):
+        if hasattr(self, 'files_window') and self.files_window.winfo_exists():
+            self.files_window.grab_release()
+            self.files_window.destroy()
+
+    def open_files_dialog(self):
+        if hasattr(self, 'files_window') and self.files_window.winfo_exists():
+            self.files_window.lift()
+            return
+
+        self.files_window = tk.Toplevel(self)
+        self.files_window.title("Attached Files")
+        self.files_window.geometry("400x300")
+
+        self.files_window.transient(self)
+        self.files_window.grab_set()
+        self.files_window.protocol("WM_DELETE_WINDOW", self.close_files_dialog)
+
+        frame = ttk.Frame(self.files_window, padding="10")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        self.files_listbox = tk.Listbox(frame)
+        self.files_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 10))
+
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.files_listbox.yview)
+        scrollbar.pack(fill=tk.Y, side=tk.RIGHT)
+        self.files_listbox.config(yscrollcommand=scrollbar.set)
+
+        button_frame = ttk.Frame(self.files_window, padding=(10,0,10,10))
+        button_frame.pack(fill=tk.X)
+
+        add_button = ttk.Button(button_frame, text="Add Files", command=self.add_files_to_list)
+        add_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        remove_button = ttk.Button(button_frame, text="Remove", command=self.remove_selected_file)
+        remove_button.pack(side=tk.LEFT)
+
+        self.files_listbox_menu = tk.Menu(self.files_listbox, tearoff=0)
+        self.files_listbox_menu.add_command(label="Remove", command=self.remove_selected_file)
+        self.files_listbox.bind("<Button-3>", self.show_files_listbox_menu)
+
+        self.update_files_listbox()
+        self.create_files_listbox_tooltip()
+
+    def add_files_to_list(self):
+        files = filedialog.askopenfilenames(parent=self.files_window)
+        if files:
+            for file_path in files:
+                if file_path not in self.chat_files:
+                    self.chat_files.append(file_path)
+                    self.process_new_chat_file(file_path)
+            self.update_files_listbox()
+
+    def remove_selected_file(self):
+        selection = self.files_listbox.curselection()
+        if selection:
+            selected_index = selection[0]
+            file_path = self.chat_files[selected_index]
+            try:
+                from rag.rag import delete_file_from_chat
+                if not self.session_id:
+                    self.show_status_message("No active chat session. Cannot delete file from RAG.")
+                else:
+                    delete_file_from_chat(file_path, chat_id=self.session_id)
+                    self.show_status_message(f"File removed from ChromaDB for chat {self.session_id}.")
+            except Exception as e:
+                self.show_status_message(f"Failed to remove file from ChromaDB: {e}")
+            del self.chat_files[selected_index]
+            self.update_files_listbox()
+
+    def update_files_listbox(self):
+        self.files_listbox.delete(0, tk.END)
+        for file_path in self.chat_files:
+            self.files_listbox.insert(tk.END, os.path.basename(file_path))
+
+    def create_files_listbox_tooltip(self):
+        tooltip = ToolTip(self.files_listbox)
+        self.last_tooltip_index = -1
+        def on_motion(event):
+            try:
+                index = self.files_listbox.index(f"@{event.x},{event.y}")
+                if self.last_tooltip_index != index:
+                    self.last_tooltip_index = index
+                    full_path = self.chat_files[index]
+                    tooltip.showtip(full_path)
+            except (tk.TclError, IndexError):
+                self.last_tooltip_index = -1
+                tooltip.hidetip()
+        
+        def on_leave(event):
+            self.last_tooltip_index = -1
+            tooltip.hidetip()
+
+        self.files_listbox.bind('<Motion>', on_motion)
+        self.files_listbox.bind('<Leave>', on_leave)
+
+    def show_files_listbox_menu(self, event):
+        try:
+            selection_index = self.files_listbox.index(f"@{event.x},{event.y}")
+            self.files_listbox.selection_clear(0, tk.END)
+            self.files_listbox.selection_set(selection_index)
+            self.files_listbox_menu.post(event.x_root, event.y_root)
+        except tk.TclError:
+            # Click was not on an item
+            pass
+
+    def process_new_chat_file(self, file_path):
+        self.show_status_message(f"Processing file: {os.path.basename(file_path)}")
+        try:
+            from rag.rag import add_file_to_chat
+            if not self.session_id:
+                self.show_status_message("No active chat session. Cannot associate file.")
+                return
+            add_file_to_chat(file_path, chat_id=self.session_id)
+            self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
+        except Exception as e:
+            self.show_status_message(f"Failed to embed file: {e}")
+
     def send_message(self, event=None):
         content = self.input_box.get("1.0", tk.END).strip()
 
@@ -1835,6 +1968,24 @@ class ChatApp(tk.Tk):
         system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
         if system_prompt:
             message_blocks.insert(0, {"role": "system", "content": system_prompt})
+
+        # RAG workflow: If chat has associated files, retrieve context from ChromaDB
+        context_block = None
+        if hasattr(self, 'chat_files') and self.chat_files:
+            try:
+                top_k = 5
+                rag_results = query_by_chat_id(self.session_id, content, n_results=top_k)
+                if rag_results:
+                    context_texts = [r['text'] for r in rag_results]
+                    context_block = '\n---\n'.join(context_texts)
+                    content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
+                    # Replace user message in message_blocks
+                    for msg in message_blocks:
+                        if msg['role'] == 'user':
+                            msg['content'] = content_with_context
+                            break
+            except Exception as e:
+                self.show_status_message(f"RAG context retrieval failed: {e}")
 
         self.input_box.configure(state="disabled")
         self.chat_history.configure(state="normal")
@@ -1986,16 +2137,18 @@ class ChatApp(tk.Tk):
         self.input_container_frame.grid()
         self.input_box.focus_set()
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SlipstreamAI Client")
-    parser.add_argument("--db", default="chat_sessions.db", help="Path to chat database")
+    parser = argparse.ArgumentParser(description="A simple chat client with session management.")
+    parser.add_argument('--db', type=str, help='Path to the chat sessions database.')
     args = parser.parse_args()
 
-    DB_PATH = args.db
+    if args.db:
+        DB_PATH = args.db
+    
     RECENT_DBS = load_recent_dbs()
     if DB_PATH not in RECENT_DBS:
         RECENT_DBS.insert(0, DB_PATH)
+        RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
 
     app = ChatApp()

@@ -111,6 +111,8 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 })
 
+// Removed /v1/embeddings endpoint as embedding will be handled on the client side.
+
 app.listen(PORT, () => {
   console.log(`🚀 Proxy running with streaming at http://localhost:${PORT}`)
 })

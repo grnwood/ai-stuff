@@ -1,0 +1,8 @@
+requests
+python-dotenv
+Markdown
+customtkinter
+Pillow
+pymupdf
+python-docx
+chromadb
