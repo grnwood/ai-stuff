@@ -4,3 +4,5 @@ markdown
 pillow
 openai
 selenium
+sentence-transformers
+

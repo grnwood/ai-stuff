@@ -13,9 +13,37 @@ from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
 
-# RAG imports
+# RAG imports are lazy-loaded via RAGManager
 sys.path.append(os.path.dirname(__file__) + '/rag')
-from rag.rag import query_by_chat_id, add_file_to_chat, get_files_for_chat
+
+class RAGManager:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            try:
+                print("Initializing RAG Manager...")
+                cls._instance = cls()
+                print("RAG Manager initialized.")
+            except ImportError as e:
+                messagebox.showerror("RAG Error", f"Could not load RAG components. Please ensure required libraries are installed.\n{e}")
+                cls._instance = None # Ensure it stays None if import fails
+            except Exception as e:
+                messagebox.showerror("RAG Error", f"An unexpected error occurred during RAG initialization:\n{e}")
+                cls._instance = None
+        return cls._instance
+
+    def __init__(self):
+        if RAGManager._instance is not None:
+            raise RuntimeError("This class is a singleton!")
+        
+        # This is where the expensive import happens
+        from rag.rag import query_by_chat_id, add_file_to_chat, get_files_for_chat, delete_file_from_chat
+        self.query_by_chat_id = query_by_chat_id
+        self.add_file_to_chat = add_file_to_chat
+        self.get_files_for_chat = get_files_for_chat
+        self.delete_file_from_chat = delete_file_from_chat
 
 load_dotenv()
 
@@ -49,7 +77,7 @@ def save_recent_dbs(paths):
         with open(RECENT_DB_FILE, "w") as f:
             json.dump(paths, f)
     except Exception:
-        pass
+            pass
 
 def get_available_models():
     try:
@@ -453,7 +481,7 @@ class ToolTip:
         self.x = self.y = 0
 
     def showtip(self, text):
-        "Display text in tooltip window"
+        """Display text in tooltip window"""
         self.text = text
         if self.tip_window or not self.text:
             return
@@ -711,7 +739,7 @@ class ChatApp(tk.Tk):
         selection = self.session_tree.selection()
         if not selection:
             return
-        
+
         selected_item = selection[0]
         session_id, type = self.session_tree.item(selected_item, "values")
         session_id = int(session_id)
@@ -728,20 +756,35 @@ class ChatApp(tk.Tk):
             return
 
         messages = get_messages(session_id)
+        
+        do_delete = False
         if not messages: # If the session is empty, delete without confirmation
-            delete_session_and_messages(session_id)
-            self.session_tree.delete(selected_item)
+            do_delete = True
         elif messagebox.askyesno("Delete Session", f"Are you sure you want to delete session '{session_name}' and all its messages?"):
+            do_delete = True
+
+        if do_delete:
+            rag_manager = RAGManager.get_instance()
+            if rag_manager:
+                try:
+                    files_to_delete = rag_manager.get_files_for_chat(session_id)
+                    if files_to_delete:
+                        for file_path in files_to_delete:
+                            rag_manager.delete_file_from_chat(file_path, chat_id=session_id)
+                        self.show_status_message(f"Deleted {len(files_to_delete)} associated files from RAG.")
+                except Exception as e:
+                    self.show_status_message(f"Error deleting RAG files: {e}")
+
             delete_session_and_messages(session_id)
             self.session_tree.delete(selected_item)
 
-        if self.session_id == session_id:
-            self.session_id = None
-            self.session_name = None
-            self.chat_history.configure(state="normal")
-            self.chat_history.delete("1.0", tk.END)
-            self.chat_history.configure(state="normal")
-            self.update_input_widgets_state()
+            if self.session_id == session_id:
+                self.session_id = None
+                self.session_name = None
+                self.chat_history.configure(state="normal")
+                self.chat_history.delete("1.0", tk.END)
+                self.chat_history.configure(state="normal")
+                self.update_input_widgets_state()
 
     def build_gui(self):
         self.grid_rowconfigure(0, weight=1)
@@ -1490,7 +1533,12 @@ class ChatApp(tk.Tk):
                 if system_prompt:
                     self.system_prompt_text.insert("1.0", system_prompt)
 
-                self.chat_files = get_files_for_chat(self.session_id)
+                rag_manager = RAGManager.get_instance()
+                if rag_manager:
+                
+                    self.chat_files = rag_manager.get_files_for_chat(self.session_id)
+                else:
+                    self.chat_files = []
                 self.load_chat_history()
                 self.message_history = get_input_history(self.session_id)
                 self.history_index = len(self.message_history)
@@ -1668,22 +1716,24 @@ class ChatApp(tk.Tk):
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
         if hasattr(self, 'chat_files') and self.chat_files:
-            try:
-                # Embed query and retrieve top-K relevant chunks
-                top_k = 5
-                rag_results = query_by_chat_id(self.session_id, content, n_results=top_k)
-                if rag_results:
-                    context_texts = [r['text'] for r in rag_results]
-                    context_block = '\n---\n'.join(context_texts)
-                    # Prepend context to user message
-                    content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
-                    # Replace user message in message_blocks
-                    for msg in message_blocks:
-                        if msg['role'] == 'user':
-                            msg['content'] = content_with_context
-                            break
-            except Exception as e:
-                self.show_status_message(f"RAG context retrieval failed: {e}")
+            rag_manager = RAGManager.get_instance()
+            if rag_manager:
+                try:
+                    # Embed query and retrieve top-K relevant chunks
+                    top_k = 5
+                    rag_results = rag_manager.query_by_chat_id(self.session_id, prompt_content, n_results=top_k)
+                    if rag_results:
+                        context_texts = [r['text'] for r in rag_results]
+                        context_block = '\n---\n'.join(context_texts)
+                        # Prepend context to user message
+                        content_with_context = f"Context:\n{context_block}\n\nUser Query: {prompt_content}"
+                        # Replace user message in message_blocks
+                        for msg in message_blocks:
+                            if msg['role'] == 'user':
+                                msg['content'] = content_with_context
+                                break
+                except Exception as e:
+                    self.show_status_message(f"RAG context retrieval failed: {e}")
             item_to_select = self.find_tree_item_by_id(active_session_id)
             if item_to_select:
                 self.session_tree.selection_set(item_to_select)
@@ -1701,6 +1751,7 @@ class ChatApp(tk.Tk):
             prompt = f"Summarize the following text in 5 words or less to use as a title for a new chat session:\n\n{selected_text}"
             messages = [{"role": "user", "content": prompt}]
             
+            # Call send_to_api without a widget to get the response directly
             new_session_name = send_to_api(
                 "New Discussion", 
                 messages, 
@@ -1886,15 +1937,16 @@ class ChatApp(tk.Tk):
         if selection:
             selected_index = selection[0]
             file_path = self.chat_files[selected_index]
-            try:
-                from rag.rag import delete_file_from_chat
-                if not self.session_id:
-                    self.show_status_message("No active chat session. Cannot delete file from RAG.")
-                else:
-                    delete_file_from_chat(file_path, chat_id=self.session_id)
-                    self.show_status_message(f"File removed from ChromaDB for chat {self.session_id}.")
-            except Exception as e:
-                self.show_status_message(f"Failed to remove file from ChromaDB: {e}")
+            rag_manager = RAGManager.get_instance()
+            if rag_manager:
+                try:
+                    if not self.session_id:
+                        self.show_status_message("No active chat session. Cannot delete file from RAG.")
+                    else:
+                        rag_manager.delete_file_from_chat(file_path, chat_id=self.session_id)
+                        self.show_status_message(f"File removed from ChromaDB for chat {self.session_id}.")
+                except Exception as e:
+                    self.show_status_message(f"Failed to remove file from ChromaDB: {e}")
             del self.chat_files[selected_index]
             self.update_files_listbox()
 
@@ -1936,15 +1988,16 @@ class ChatApp(tk.Tk):
 
     def process_new_chat_file(self, file_path):
         self.show_status_message(f"Processing file: {os.path.basename(file_path)}")
-        try:
-            from rag.rag import add_file_to_chat
-            if not self.session_id:
-                self.show_status_message("No active chat session. Cannot associate file.")
-                return
-            add_file_to_chat(file_path, chat_id=self.session_id)
-            self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
-        except Exception as e:
-            self.show_status_message(f"Failed to embed file: {e}")
+        rag_manager = RAGManager.get_instance()
+        if rag_manager:
+            try:
+                if not self.session_id:
+                    self.show_status_message("No active chat session. Cannot associate file.")
+                    return
+                rag_manager.add_file_to_chat(file_path, chat_id=self.session_id)
+                self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
+            except Exception as e:
+                self.show_status_message(f"Failed to embed file: {e}")
 
     def send_message(self, event=None):
         content = self.input_box.get("1.0", tk.END).strip()
@@ -1972,184 +2025,172 @@ class ChatApp(tk.Tk):
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
         if hasattr(self, 'chat_files') and self.chat_files:
-            try:
-                top_k = 5
-                rag_results = query_by_chat_id(self.session_id, content, n_results=top_k)
-                if rag_results:
-                    context_texts = [r['text'] for r in rag_results]
-                    context_block = '\n---\n'.join(context_texts)
-                    content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
-                    # Replace user message in message_blocks
-                    for msg in message_blocks:
-                        if msg['role'] == 'user':
-                            msg['content'] = content_with_context
-                            break
-            except Exception as e:
-                self.show_status_message(f"RAG context retrieval failed: {e}")
+            rag_manager = RAGManager.get_instance()
+            if rag_manager:
+                try:
+                    top_k = 5
+                    rag_results = rag_manager.query_by_chat_id(self.session_id, content, n_results=top_k)
+                    if rag_results:
+                        context_texts = [r['text'] for r in rag_results]
+                        context_block = '\n---\n'.join(context_texts)
+                        content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
+                        # Replace user message in message_blocks
+                        for msg in message_blocks:
+                            if msg['role'] == 'user':
+                                msg['content'] = content_with_context
+                                break
+                except Exception as e:
+                    self.show_status_message(f"RAG context retrieval failed: {e}")
 
-        self.input_box.configure(state="disabled")
-        self.chat_history.configure(state="normal")
-        self.chat_history.insert(tk.END, f"User:\n{content}\n\n", ("user_tag", "bold"))
-        self.chat_history.see(tk.END)
-        self.chat_history.configure(state="normal")
+        self.load_chat_history()
+        
+        # Ensure the UI updates to show the user's message before the API call
         self.update_idletasks()
 
         try:
-            assistant_full_reply = send_to_api(self.session_name, message_blocks, self.model_var.get(), self.session_id, widget=self.chat_history, save_message_to_db=True)
-            if assistant_full_reply: # Only summarize if there was a response
-                self.summarize_and_rename_session()
-        except requests.exceptions.RequestException as e:
-            messagebox.showerror("Network Error", f"Could not connect to the server or API: {e}")
+            send_to_api(self.session_name, message_blocks, self.model_var.get(), active_session_id, self.chat_history)
         except Exception as e:
-            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
-        finally:
-            self.input_box.configure(state="normal")
-            self.input_box.focus_set()
-            
-            item_to_select = self.find_tree_item_by_id(active_session_id)
-            if item_to_select:
-                self.session_tree.selection_set(item_to_select)
-                self.session_tree.focus(item_to_select)
-
-            self.load_chat_history()
+            messagebox.showerror("API Error", str(e))
+        
+        # After the response, reload the history to show the assistant's message
+        self.load_chat_history()
+        
+        # Auto-summarize session name after a few messages
+        if len(messages) % 5 == 0 and len(messages) > 0:
+            self.summarize_and_rename_session()
 
         return "break"
 
-    def history_up_wrapper(self, event=None):
-        # Only trigger history if the cursor is on the first line
-        cursor_line = int(self.input_box.index(tk.INSERT).split('.')[0])
-        if cursor_line == 1:
+    def history_up_wrapper(self, event):
+        # Only trigger history if cursor is at the beginning of the input box
+        if self.input_box.index(tk.INSERT) == "1.0":
             return self.history_up(event)
-        # Otherwise, allow default Up arrow behavior (moving cursor)
-
-    def history_down_wrapper(self, event=None):
-        # Only trigger history if the cursor is on the last line
-        last_line = int(self.input_box.index('end-1c').split('.')[0])
-        cursor_line = int(self.input_box.index(tk.INSERT).split('.')[0])
-        if cursor_line == last_line:
+    
+    def history_down_wrapper(self, event):
+        # Only trigger history if cursor is at the end of the input box
+        if self.input_box.index(tk.INSERT) == self.input_box.index(tk.END + "-1c"):
             return self.history_down(event)
-        # Otherwise, allow default Down arrow behavior (moving cursor)
 
-    def history_up(self, event=None):
+    def history_up(self, event):
         if not self.message_history:
-            return "break"
-            
+            return
+
+        # If we're at the current input, buffer it
         if self.history_index == len(self.message_history):
-            self.current_input_buffer = self.input_box.get("1.0", tk.END)
+            self.current_input_buffer = self.input_box.get("1.0", tk.END).strip()
 
         if self.history_index > 0:
             self.history_index -= 1
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", self.message_history[self.history_index])
-        
         return "break"
 
-    def history_down(self, event=None):
+    def history_down(self, event):
         if not self.message_history:
-            return "break"
+            return
 
-        if self.history_index < len(self.message_history) -1:
+        if self.history_index < len(self.message_history) - 1:
             self.history_index += 1
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", self.message_history[self.history_index])
-        elif self.history_index == len(self.message_history) -1:
+        elif self.history_index == len(self.message_history) - 1:
+            # We're at the last item in history, so move to the buffered current input
             self.history_index += 1
             self.input_box.delete("1.0", tk.END)
             self.input_box.insert("1.0", self.current_input_buffer)
-
         return "break"
 
     def chat_history_keypress(self, event):
-        navigation_keys = {
-            'Up', 'Down', 'Left', 'Right', 'Prior', 'Next', 'Home', 'End'
-        }
-        if event.keysym in navigation_keys:
-            return
-        if event.state & 0x4 and event.keysym.lower() in {'c', 'a'}:
-            return
-        if len(event.char) == 0:
-            return
+        # Allow copying from the disabled ScrolledText widget
+        if event.state == 4 and event.keysym.lower() == 'c': # Ctrl+C
+            self.copy_chat_selection()
         return "break"
 
     def increase_font_size(self, event=None):
-        print("Increase font size called")
         new_size = self.chat_font_size.get() + 1
-        if 8 <= new_size <= 72:
-            self.chat_font_size.set(new_size)
-            save_setting("chat_font_size", new_size)
-            self.apply_font()
+        self.chat_font_size.set(new_size)
+        self.apply_font()
+        save_setting("chat_font_size", new_size)
 
     def decrease_font_size(self, event=None):
-        print("Decrease font size called")
         new_size = self.chat_font_size.get() - 1
-        if 8 <= new_size <= 72:
+        if new_size > 0:
             self.chat_font_size.set(new_size)
-            save_setting("chat_font_size", new_size)
             self.apply_font()
+            save_setting("chat_font_size", new_size)
 
     def find_dialog(self, event=None):
         self.search_frame.grid(row=1, column=0, sticky="ew", pady=2)
-        self.input_container_frame.grid_remove()
         self.search_entry.focus_set()
+        self.search_entry.delete(0, tk.END)
+        self.chat_history.tag_remove("search_highlight", "1.0", tk.END)
+        self.search_matches = []
+        self.current_match_index = -1
+
+    def hide_search(self, event=None):
+        self.search_frame.grid_remove()
+        self.chat_history.tag_remove("search_highlight", "1.0", tk.END)
+        self.chat_history.tag_remove("current_match", "1.0", tk.END)
 
     def find_next(self, event=None):
-        self.chat_history.tag_remove('found', '1.0', tk.END)
         query = self.search_entry.get()
         if not query:
             return
 
-        self.search_matches = []
-        start_pos = '1.0'
-        while True:
-            start_pos = self.chat_history.search(query, start_pos, stopindex=tk.END, nocase=True)
-            if not start_pos:
-                break
-            end_pos = f"{start_pos}+{len(query)}c"
-            self.search_matches.append(start_pos)
-            self.chat_history.tag_add('found', start_pos, end_pos)
-            start_pos = end_pos
-        
-        self.chat_history.tag_config('found', background='yellow', foreground='black')
+        # If this is a new search
+        if not self.search_matches or self.last_search_query != query:
+            self.last_search_query = query
+            self.search_matches = []
+            self.current_match_index = -1
+            self.chat_history.tag_remove("search_highlight", "1.0", tk.END)
+            
+            start_pos = "1.0"
+            while True:
+                pos = self.chat_history.search(query, start_pos, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end_pos = f"{pos}+{len(query)}c"
+                self.search_matches.append((pos, end_pos))
+                self.chat_history.tag_add("search_highlight", pos, end_pos)
+                start_pos = end_pos
+            
+            self.chat_history.tag_config("search_highlight", background="yellow", foreground="black")
+            self.chat_history.tag_config("current_match", background="orange", foreground="black")
 
-        if self.search_matches:
-            self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
-            self.chat_history.see(self.search_matches[self.current_match_index])
-            self.chat_history.tag_remove('current_found', '1.0', tk.END)
-            self.chat_history.tag_add('current_found', self.search_matches[self.current_match_index], f"{self.search_matches[self.current_match_index]}+{len(query)}c")
-            self.chat_history.tag_config('current_found', background='orange', foreground='black')
-
-
-    def find_prev(self, event=None):
-        query = self.search_entry.get()
-        if not query or not self.search_matches:
+        if not self.search_matches:
+            self.show_status_message(f"'{query}' not found.")
             return
 
-        self.current_match_index = (self.current_match_index - 1) % len(self.search_matches)
-        self.chat_history.see(self.search_matches[self.current_match_index])
-        self.chat_history.tag_remove('current_found', '1.0', tk.END)
-        self.chat_history.tag_add('current_found', self.search_matches[self.current_match_index], f"{self.search_matches[self.current_match_index]}+{len(query)}c")
+        self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
+        self.highlight_current_match()
 
+    def find_prev(self, event=None):
+        if not self.search_matches:
+            return
 
-    def hide_search(self, event=None):
-        self.chat_history.tag_remove('found', '1.0', tk.END)
-        self.chat_history.tag_remove('current_found', '1.0', tk.END)
-        self.search_frame.grid_remove()
-        self.input_container_frame.grid()
-        self.input_box.focus_set()
+        self.current_match_index = (self.current_match_index - 1 + len(self.search_matches)) % len(self.search_matches)
+        self.highlight_current_match()
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="A simple chat client with session management.")
-    parser.add_argument('--db', type=str, help='Path to the chat sessions database.')
+    def highlight_current_match(self):
+        self.chat_history.tag_remove("current_match", "1.0", tk.END)
+        if self.current_match_index >= 0:
+            start_pos, end_pos = self.search_matches[self.current_match_index]
+            self.chat_history.tag_add("current_match", start_pos, end_pos)
+            self.chat_history.see(start_pos)
+
+def main():
+    global DB_PATH, RECENT_DBS
+    parser = argparse.ArgumentParser(description="SlipstreamAI Chat Client")
+    parser.add_argument('--db', type=str, help='Path to the chat database file.')
     args = parser.parse_args()
 
     if args.db:
         DB_PATH = args.db
     
     RECENT_DBS = load_recent_dbs()
-    if DB_PATH not in RECENT_DBS:
-        RECENT_DBS.insert(0, DB_PATH)
-        RECENT_DBS = RECENT_DBS[:5]
-        save_recent_dbs(RECENT_DBS)
-
+    
     app = ChatApp()
     app.mainloop()
+
+if __name__ == "__main__":
+    main()
