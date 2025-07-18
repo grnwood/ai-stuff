@@ -15,8 +15,11 @@ API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 
 # Load local embedding model
-print("[RAG] Loading local embedding model (sentence-transformers/all-MiniLM-L6-v2)...")
-local_embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+base_path = 'models/models--sentence-transformers--all-MiniLM-L6-v2/snapshots'
+snapshot_id = os.listdir(base_path)[0]  # assuming only one snapshot
+local_path = os.path.join(base_path, snapshot_id)
+print(f"[RAG] Loading local embedding model (sentence-transformers/all-MiniLM-L6-v2)...{snapshot_id}")
+local_embedder = SentenceTransformer(local_path)
 sentence_transformer_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
