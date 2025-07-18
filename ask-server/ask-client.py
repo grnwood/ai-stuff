@@ -1729,17 +1729,26 @@ class ChatApp(tk.Tk):
                         content_with_context = f"Context:\n{context_block}\n\nUser Query: {prompt_content}"
                         # Replace user message in message_blocks
                         for msg in message_blocks:
-                            if msg['role'] == 'user':
+                            if msg['role'] == 'user' and msg['content'] == prompt_content:
                                 msg['content'] = content_with_context
                                 break
                 except Exception as e:
                     self.show_status_message(f"RAG context retrieval failed: {e}")
-            item_to_select = self.find_tree_item_by_id(active_session_id)
-            if item_to_select:
-                self.session_tree.selection_set(item_to_select)
-                self.session_tree.focus(item_to_select)
 
-            self.load_chat_history()
+        self.load_chat_history()
+        self.update_idletasks()
+
+        try:
+            send_to_api(self.session_name, message_blocks, self.model_var.get(), active_session_id, self.chat_history)
+        except Exception as e:
+            messagebox.showerror("API Error", str(e))
+
+        self.load_chat_history()
+        
+        item_to_select = self.find_tree_item_by_id(active_session_id)
+        if item_to_select:
+            self.session_tree.selection_set(item_to_select)
+            self.session_tree.focus(item_to_select)
 
     def start_discussion_from_selection(self):
         try:
