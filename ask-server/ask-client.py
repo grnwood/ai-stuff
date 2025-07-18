@@ -13,37 +13,33 @@ from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
 
-# RAG imports are lazy-loaded via RAGManager
+# Add rag path to sys.path
 sys.path.append(os.path.dirname(__file__) + '/rag')
 
-class RAGManager:
-    _instance = None
+# Global variable for RAG functions, populated by initialize_rag
+rag_functions = {}
 
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            try:
-                print("Initializing RAG Manager...")
-                cls._instance = cls()
-                print("RAG Manager initialized.")
-            except ImportError as e:
-                messagebox.showerror("RAG Error", f"Could not load RAG components. Please ensure required libraries are installed.\n{e}")
-                cls._instance = None # Ensure it stays None if import fails
-            except Exception as e:
-                messagebox.showerror("RAG Error", f"An unexpected error occurred during RAG initialization:\n{e}")
-                cls._instance = None
-        return cls._instance
-
-    def __init__(self):
-        if RAGManager._instance is not None:
-            raise RuntimeError("This class is a singleton!")
-        
-        # This is where the expensive import happens
-        from rag.rag import query_by_chat_id, add_file_to_chat, get_files_for_chat, delete_file_from_chat
-        self.query_by_chat_id = query_by_chat_id
-        self.add_file_to_chat = add_file_to_chat
-        self.get_files_for_chat = get_files_for_chat
-        self.delete_file_from_chat = delete_file_from_chat
+def initialize_rag():
+    """Initializes RAG functions if enabled in settings."""
+    global rag_functions
+    # Default to 'true' if setting doesn't exist
+    if get_setting("enable_rag", "true") == "True":
+        try:
+            from rag.rag import get_rag_processor, add_file_to_chat, get_files_for_chat, delete_file_from_chat, query_by_chat_id
+            # Initialize the processor to trigger model loading
+            get_rag_processor() 
+            # Store functions for later use
+            rag_functions['add_file_to_chat'] = add_file_to_chat
+            rag_functions['get_files_for_chat'] = get_files_for_chat
+            rag_functions['delete_file_from_chat'] = delete_file_from_chat
+            rag_functions['query_by_chat_id'] = query_by_chat_id
+            print("RAG initialized successfully.")
+        except Exception as e:
+            print(f"Failed to initialize RAG: {e}")
+            messagebox.showerror("RAG Initialization Error", f"Could not initialize RAG components. Files functionality will be disabled.\n\nError: {e}")
+            rag_functions = {}
+    else:
+        print("RAG is disabled in settings.")
 
 load_dotenv()
 
@@ -77,7 +73,7 @@ def save_recent_dbs(paths):
         with open(RECENT_DB_FILE, "w") as f:
             json.dump(paths, f)
     except Exception:
-            pass
+        pass
 
 def get_available_models():
     try:
@@ -126,6 +122,7 @@ def init_db():
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )''')
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_rag', 'true')")
     conn.commit()
     conn.close()
 
@@ -162,7 +159,7 @@ def get_setting(key, default=None):
 def save_setting(key, value):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
 
@@ -525,6 +522,7 @@ class ChatApp(tk.Tk):
         self.message_history = []
         self.history_index = -1
         self.chat_files = []
+        self.rag_enabled = get_setting("enable_rag", "True") == "True"
         
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
@@ -764,13 +762,12 @@ class ChatApp(tk.Tk):
             do_delete = True
 
         if do_delete:
-            rag_manager = RAGManager.get_instance()
-            if rag_manager:
+            if rag_functions:
                 try:
-                    files_to_delete = rag_manager.get_files_for_chat(session_id)
+                    files_to_delete = rag_functions['get_files_for_chat'](session_id)
                     if files_to_delete:
                         for file_path in files_to_delete:
-                            rag_manager.delete_file_from_chat(file_path, chat_id=session_id)
+                            rag_functions['delete_file_from_chat'](file_path, chat_id=session_id)
                         self.show_status_message(f"Deleted {len(files_to_delete)} associated files from RAG.")
                 except Exception as e:
                     self.show_status_message(f"Error deleting RAG files: {e}")
@@ -990,6 +987,7 @@ class ChatApp(tk.Tk):
 
         # --- Right Panel (System Prompt) ---
         self.right_frame = ttk.Frame(self.main_paned_window, width=250)
+        self.main_paned_window.add(self.right_frame)
         self.right_frame.columnconfigure(0, weight=1)
         self.right_frame.rowconfigure(4, weight=1)
         
@@ -1370,6 +1368,14 @@ class ChatApp(tk.Tk):
         self.selection_bg.trace_add("write", on_selection_color_change)
         self.selection_fg.trace_add("write", on_selection_color_change)
 
+        # Enable RAG setting
+        ttk.Label(settings_win, text="Enable RAG (requires restart):").grid(row=19, column=0, sticky="w", pady=5, padx=20)
+        rag_var = tk.BooleanVar(value=self.rag_enabled)
+        def on_rag_toggle():
+            save_setting("enable_rag", rag_var.get())
+            messagebox.showinfo("Restart Required", "Please restart the application for the RAG setting to take effect.", parent=settings_win)
+        ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=20, column=0, sticky="w", padx=20)
+
     def export_chat(self):
         if not self.session_id:
             messagebox.showinfo("Export Chat", "No session selected to export.")
@@ -1533,10 +1539,8 @@ class ChatApp(tk.Tk):
                 if system_prompt:
                     self.system_prompt_text.insert("1.0", system_prompt)
 
-                rag_manager = RAGManager.get_instance()
-                if rag_manager:
-                
-                    self.chat_files = rag_manager.get_files_for_chat(self.session_id)
+                if rag_functions:
+                    self.chat_files = rag_functions['get_files_for_chat'](self.session_id)
                 else:
                     self.chat_files = []
                 self.load_chat_history()
@@ -1580,7 +1584,7 @@ class ChatApp(tk.Tk):
         else:
             self.input_box.configure(state="normal")
             self.send_button.configure(state="normal")
-            self.files_button.configure(state="normal")
+            self.files_button.configure(state="normal" if self.rag_enabled else "disabled")
             self.status_bar.config(text="")
 
     def new_session(self, parent_id=None):
@@ -1673,7 +1677,7 @@ class ChatApp(tk.Tk):
                 "extract_key_points": "Highlight the key points in the following text",
                 "extract_entities": "Extract named entities (people, places, dates, etc.) from the following text",
                 "extract_action_items": "Pull out any action items from the following text",
-                "expand_continue": "Continue writing from the following text",
+                "expand_continue": "Continue writing from here",
                 "expand_follow_up": "Generate a follow-up paragraph, story, or argument based on the following text",
                 "define_terms": "Define the following term(s)",
                 "define_context": "Provide background or context for the following text",
@@ -1715,25 +1719,23 @@ class ChatApp(tk.Tk):
 
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
-        if hasattr(self, 'chat_files') and self.chat_files:
-            rag_manager = RAGManager.get_instance()
-            if rag_manager:
-                try:
-                    # Embed query and retrieve top-K relevant chunks
-                    top_k = 5
-                    rag_results = rag_manager.query_by_chat_id(self.session_id, prompt_content, n_results=top_k)
-                    if rag_results:
-                        context_texts = [r['text'] for r in rag_results]
-                        context_block = '\n---\n'.join(context_texts)
-                        # Prepend context to user message
-                        content_with_context = f"Context:\n{context_block}\n\nUser Query: {prompt_content}"
-                        # Replace user message in message_blocks
-                        for msg in message_blocks:
-                            if msg['role'] == 'user' and msg['content'] == prompt_content:
-                                msg['content'] = content_with_context
-                                break
-                except Exception as e:
-                    self.show_status_message(f"RAG context retrieval failed: {e}")
+        if rag_functions and self.chat_files:
+            try:
+                # Embed query and retrieve top-K relevant chunks
+                top_k = 5
+                rag_results = rag_functions['query_by_chat_id'](self.session_id, prompt_content, n_results=top_k)
+                if rag_results:
+                    context_texts = [r['text'] for r in rag_results]
+                    context_block = '\n---\n'.join(context_texts)
+                    # Prepend context to user message
+                    content_with_context = f"Context:\n{context_block}\n\nUser Query: {prompt_content}"
+                    # Replace user message in message_blocks
+                    for msg in message_blocks:
+                        if msg['role'] == 'user' and msg['content'] == prompt_content:
+                            msg['content'] = content_with_context
+                            break
+            except Exception as e:
+                self.show_status_message(f"RAG context retrieval failed: {e}")
 
         self.load_chat_history()
         self.update_idletasks()
@@ -1946,13 +1948,12 @@ class ChatApp(tk.Tk):
         if selection:
             selected_index = selection[0]
             file_path = self.chat_files[selected_index]
-            rag_manager = RAGManager.get_instance()
-            if rag_manager:
+            if rag_functions:
                 try:
                     if not self.session_id:
                         self.show_status_message("No active chat session. Cannot delete file from RAG.")
                     else:
-                        rag_manager.delete_file_from_chat(file_path, chat_id=self.session_id)
+                        rag_functions['delete_file_from_chat'](file_path, chat_id=self.session_id)
                         self.show_status_message(f"File removed from ChromaDB for chat {self.session_id}.")
                 except Exception as e:
                     self.show_status_message(f"Failed to remove file from ChromaDB: {e}")
@@ -1996,17 +1997,16 @@ class ChatApp(tk.Tk):
             pass
 
     def process_new_chat_file(self, file_path):
+        if not rag_functions: return
         self.show_status_message(f"Processing file: {os.path.basename(file_path)}")
-        rag_manager = RAGManager.get_instance()
-        if rag_manager:
-            try:
-                if not self.session_id:
-                    self.show_status_message("No active chat session. Cannot associate file.")
-                    return
-                rag_manager.add_file_to_chat(file_path, chat_id=self.session_id)
-                self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
-            except Exception as e:
-                self.show_status_message(f"Failed to embed file: {e}")
+        try:
+            if not self.session_id:
+                self.show_status_message("No active chat session. Cannot associate file.")
+                return
+            rag_functions['add_file_to_chat'](file_path, chat_id=self.session_id)
+            self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
+        except Exception as e:
+            self.show_status_message(f"Failed to embed file: {e}")
 
     def send_message(self, event=None):
         content = self.input_box.get("1.0", tk.END).strip()
@@ -2033,23 +2033,21 @@ class ChatApp(tk.Tk):
 
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
-        if hasattr(self, 'chat_files') and self.chat_files:
-            rag_manager = RAGManager.get_instance()
-            if rag_manager:
-                try:
-                    top_k = 5
-                    rag_results = rag_manager.query_by_chat_id(self.session_id, content, n_results=top_k)
-                    if rag_results:
-                        context_texts = [r['text'] for r in rag_results]
-                        context_block = '\n---\n'.join(context_texts)
-                        content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
-                        # Replace user message in message_blocks
-                        for msg in message_blocks:
-                            if msg['role'] == 'user':
-                                msg['content'] = content_with_context
-                                break
-                except Exception as e:
-                    self.show_status_message(f"RAG context retrieval failed: {e}")
+        if rag_functions and self.chat_files:
+            try:
+                top_k = 5
+                rag_results = rag_functions['query_by_chat_id'](self.session_id, content, n_results=top_k)
+                if rag_results:
+                    context_texts = [r['text'] for r in rag_results]
+                    context_block = '\n---\n'.join(context_texts)
+                    content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
+                    # Replace user message in message_blocks
+                    for msg in message_blocks:
+                        if msg['role'] == 'user':
+                            msg['content'] = content_with_context
+                            break
+            except Exception as e:
+                self.show_status_message(f"RAG context retrieval failed: {e}")
 
         self.load_chat_history()
         
@@ -2192,12 +2190,12 @@ def main():
     parser = argparse.ArgumentParser(description="SlipstreamAI Chat Client")
     parser.add_argument('--db', type=str, help='Path to the chat database file.')
     args = parser.parse_args()
-
-    if args.db:
-        DB_PATH = args.db
-    
+    if args.db: DB_PATH = args.db
     RECENT_DBS = load_recent_dbs()
-    
+    # Initialize database first so settings are available
+    init_db()
+    # Now initialize RAG based on settings
+    initialize_rag()
     app = ChatApp()
     app.mainloop()
 
