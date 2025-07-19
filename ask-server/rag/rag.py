@@ -1,12 +1,16 @@
 import fitz
 from docx import Document
 import requests
+from ocr.tesseract import is_tesseract
+from ocr.tesseract import extract_text_from_pdf
 import os
 import chromadb
 from dotenv import load_dotenv
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from sentence_transformers import SentenceTransformer
 import sys
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 class LocalEmbeddingFunction(EmbeddingFunction):
     def __init__(self, model):
@@ -29,7 +33,7 @@ class RAGProcessor:
         self.API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 
         # Load local embedding model
-        base_path = os.path.join("rag/models", "models--sentence-transformers--all-MiniLM-L6-v2", "snapshots")
+        base_path = os.path.join(PROJECT_ROOT,"rag/models", "models--sentence-transformers--all-MiniLM-L6-v2", "snapshots")
         snapshot_ids = os.listdir(base_path)
         if not snapshot_ids:
             raise FileNotFoundError(f"No snapshot folders found in {base_path}")
@@ -63,6 +67,9 @@ def extract_text(filepath):
         doc = fitz.open(filepath)
         text = "\n".join(page.get_text() for page in doc)
         doc.close()
+        if not text and is_tesseract():
+            print(f"No text discovered, trying as a image...")
+            return extract_text_from_pdf(filepath)
         return text
     elif filepath.lower().endswith(".docx"):
         doc = Document(filepath)
@@ -154,7 +161,7 @@ def get_files_for_chat(chat_id: str):
     return list(unique_files)
 
 def main():
-    filename = "rag/richesrestaurant.pdf"
+    filename = os.path.join(PROJECT_ROOT, "rag", "richesrestaurant.pdf")
     if os.path.exists(filename):
         print(f"Processing {filename}...")
         add_file_to_chat(filename, 'chat123')
@@ -169,7 +176,24 @@ def main():
     else:
         print(f"File '{filename}' not found in current directory.")
 
+    # try a image based PDF/ocr.
+    filename = os.path.join(PROJECT_ROOT, "rag/ocr", "ParksidePaws.pdf")
+    if os.path.exists(filename):
+        print(f"Processing {filename}...")
+        add_file_to_chat(filename, 'chat123')
+        matches = query_by_chat_id(chat_id="chat123", query="How much for walk?", n_results=3)
+
+        for match in matches:
+            print("Text:", match["text"])
+            print("From file:", match["metadata"].get("source"))
+            print("---")
+
+        delete_file_from_chat(filename, 'chat123')
+    else:
+        print(f"File '{filename}' not found in current directory.")
+
+    
 if __name__ == "__main__":
     main()
-
+    
 __all__ = ["query_by_chat_id", "add_file_to_chat", "delete_file_from_chat", "get_files_for_chat", "delete_all_files_from_chat"]

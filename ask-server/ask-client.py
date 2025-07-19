@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 # Add rag path to sys.path
 sys.path.append(os.path.dirname(__file__) + '/rag')
 
