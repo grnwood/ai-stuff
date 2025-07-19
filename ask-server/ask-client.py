@@ -9,6 +9,7 @@ import argparse
 import sys
 from markdown import markdown
 from html.parser import HTMLParser
+from tkinter import PhotoImage
 from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
@@ -513,8 +514,15 @@ def create_tooltip(widget, text_func):
 class ChatApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        
         self.title("SlipstreamAI")
         self.geometry("1000x600")
+        # Load icon for window title bar and alt-tab
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_dir, "assets", "slipstreamAI.png")  # use full path
+        self.icon_img = PhotoImage(file=icon_path)
+        self.iconphoto(True, self.icon_img)  # ← this sets the window icon
+
 
         init_db()
         self.session_id = None
@@ -532,8 +540,8 @@ class ChatApp(tk.Tk):
         self.selection_bg = tk.StringVar(value=get_setting("selection_bg", "#b2d7ff"))
         self.selection_fg = tk.StringVar(value=get_setting("selection_fg", "black"))
 
-        self.chat_icon = tk.PhotoImage(file="comment-alt.png")
-        self.folder_icon = tk.PhotoImage(file="folder-open.png")
+        self.chat_icon = tk.PhotoImage(file="assets/comment-alt.png")
+        self.folder_icon = tk.PhotoImage(file="assets/folder-open.png")
         self.space = tk.PhotoImage(width=5, height=1)
 
         self.build_gui()
