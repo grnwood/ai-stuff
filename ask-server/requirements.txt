@@ -1,8 +1,13 @@
 requests
 python-dotenv
-Markdown
+markdown
 customtkinter
-Pillow
+pillow
 pymupdf
 python-docx
 chromadb
+openai
+selenium
+sentence-transformers
+torch
+
