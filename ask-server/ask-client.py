@@ -58,8 +58,8 @@ def initialize_rag():
 
 def fetch_url_text(url: str) -> str:
     """Retrieve the text content of a URL using BeautifulSoup."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+    #headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, allow_redirects=True, timeout=10)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     return soup.get_text(separator="\n")
@@ -570,8 +570,8 @@ class ChatApp(tk.Tk):
         self.selection_bg = tk.StringVar(value=get_setting("selection_bg", "#b2d7ff"))
         self.selection_fg = tk.StringVar(value=get_setting("selection_fg", "black"))
 
-        self.chat_icon = tk.PhotoImage(file="assets/comment-alt.png")
-        self.folder_icon = tk.PhotoImage(file="assets/folder-open.png")
+        self.chat_icon = tk.PhotoImage(file=os.path.join("ask-server/assets", "comment-alt.png"))
+        self.folder_icon = tk.PhotoImage(file=os.path.join("ask-server/assets", "folder-open.png"))
         self.space = tk.PhotoImage(width=5, height=1)
 
         self.build_gui()
