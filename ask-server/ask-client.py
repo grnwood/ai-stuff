@@ -7,12 +7,14 @@ import json
 import sqlite3
 import argparse
 import sys
+import re
 from markdown import markdown
 from html.parser import HTMLParser
 from tkinter import PhotoImage
 from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
+from bs4 import BeautifulSoup
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -28,13 +30,23 @@ def initialize_rag():
     # Default to 'true' if setting doesn't exist
     if get_setting("enable_rag", "true") == "True":
         try:
-            from rag.rag import get_rag_processor, add_file_to_chat, get_files_for_chat, delete_file_from_chat, query_by_chat_id
+            from rag.rag import (
+                get_rag_processor,
+                add_file_to_chat,
+                add_text_to_chat,
+                get_files_for_chat,
+                delete_file_from_chat,
+                delete_source_from_chat,
+                query_by_chat_id,
+            )
             # Initialize the processor to trigger model loading
             get_rag_processor() 
             # Store functions for later use
             rag_functions['add_file_to_chat'] = add_file_to_chat
+            rag_functions['add_text_to_chat'] = add_text_to_chat
             rag_functions['get_files_for_chat'] = get_files_for_chat
             rag_functions['delete_file_from_chat'] = delete_file_from_chat
+            rag_functions['delete_source_from_chat'] = delete_source_from_chat
             rag_functions['query_by_chat_id'] = query_by_chat_id
             print("RAG initialized successfully.")
         except Exception as e:
@@ -43,6 +55,14 @@ def initialize_rag():
             rag_functions = {}
     else:
         print("RAG is disabled in settings.")
+
+def fetch_url_text(url: str) -> str:
+    """Retrieve the text content of a URL using BeautifulSoup."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    return soup.get_text(separator="\n")
 
 load_dotenv()
 
@@ -211,6 +231,14 @@ def save_message(session_id, role, content):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", (session_id, role, content))
+    conn.commit()
+    conn.close()
+
+def delete_message_by_content(session_id, content):
+    """Delete messages matching the given content for a session."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM messages WHERE session_id = ? AND content = ?", (session_id, content))
     conn.commit()
     conn.close()
 
@@ -1963,17 +1991,27 @@ class ChatApp(tk.Tk):
                     if not self.session_id:
                         self.show_status_message("No active chat session. Cannot delete file from RAG.")
                     else:
-                        rag_functions['delete_file_from_chat'](file_path, chat_id=self.session_id)
+                        if file_path.startswith("http://") or file_path.startswith("https://"):
+                            rag_functions['delete_source_from_chat'](file_path, chat_id=self.session_id)
+                            delete_message_by_content(self.session_id, file_path)
+                            delete_message_by_content(self.session_id, f"Retrieved and stored content from {file_path}")
+                        else:
+                            rag_functions['delete_file_from_chat'](file_path, chat_id=self.session_id)
                         self.show_status_message(f"File removed from ChromaDB for chat {self.session_id}.")
                 except Exception as e:
                     self.show_status_message(f"Failed to remove file from ChromaDB: {e}")
             del self.chat_files[selected_index]
             self.update_files_listbox()
+            self.load_chat_history()
 
     def update_files_listbox(self):
         self.files_listbox.delete(0, tk.END)
         for file_path in self.chat_files:
-            self.files_listbox.insert(tk.END, os.path.basename(file_path))
+            if file_path.startswith("http://") or file_path.startswith("https://"):
+                display = f"URL:{file_path}"
+            else:
+                display = os.path.basename(file_path)
+            self.files_listbox.insert(tk.END, display)
 
     def create_files_listbox_tooltip(self):
         tooltip = ToolTip(self.files_listbox)
@@ -2033,6 +2071,23 @@ class ChatApp(tk.Tk):
         self.message_history = get_input_history(self.session_id)
         self.history_index = len(self.message_history)
         self.current_input_buffer = ""
+
+        url_pattern = r'^https?://\S+$'
+        if re.match(url_pattern, content) and rag_functions:
+            self.load_chat_history()
+            self.show_status_message(f"Retrieving {content}...")
+            try:
+                text = fetch_url_text(content)
+                rag_functions['add_text_to_chat'](text, source=content, chat_id=self.session_id)
+                rag_functions['query_by_chat_id'](self.session_id, text, n_results=1)
+                if content not in self.chat_files:
+                    self.chat_files.append(content)
+                    self.update_files_listbox()
+                save_message(self.session_id, "assistant", f"Retrieved and stored content from {content}")
+            except Exception as e:
+                save_message(self.session_id, "assistant", f"Error retrieving {content}: {e}")
+            self.load_chat_history()
+            return "break"
         
         messages = get_messages(self.session_id)
         message_blocks = [{"role": role, "content": content} for role, content in messages]
