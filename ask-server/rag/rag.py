@@ -96,10 +96,34 @@ def add_file_to_chat(filepath, chat_id=None):
             return chunk_ids
         else:
             print(f"No text extracted from file '{filepath}'. Skipping addition to ChromaDB.")
-            return []
+        return []
 
     except Exception as e:
         print(f"Error adding file '{filepath}' to ChromaDB: {e}")
+        return []
+
+def add_text_to_chat(text, source, chat_id=None):
+    """Embed arbitrary text into ChromaDB with an associated source string."""
+    try:
+        if text:
+            chunk_size = 1000
+            chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            chunk_ids = [f"{source}_chunk_{i}" for i in range(len(chunk_texts))]
+            metadatas = [{"chat_id": chat_id, "source": source, "chunk": i} for i in range(len(chunk_texts))]
+
+            get_rag_processor().collection.add(
+                documents=chunk_texts,
+                ids=chunk_ids,
+                metadatas=metadatas
+            )
+            print(f"Text from '{source}' added to ChromaDB in {len(chunk_texts)} chunks.")
+            return chunk_ids
+        else:
+            print(f"No text provided for source '{source}'. Skipping addition to ChromaDB.")
+            return []
+
+    except Exception as e:
+        print(f"Error adding text for source '{source}' to ChromaDB: {e}")
         return []
 
 def delete_file_from_chromadb(filepath):
@@ -116,6 +140,18 @@ def delete_file_from_chat(filepath, chat_id=None):
         print(f"Deleted {len(ids)} chunks for file '{filepath}' in chat '{chat_id}' from ChromaDB.")
         return len(ids)
     print(f"No chunks found for file '{filepath}' in chat '{chat_id}'.")
+    return 0
+
+def delete_source_from_chat(source, chat_id=None):
+    """Delete all chunks associated with a specific source string."""
+    rag_processor = get_rag_processor()
+    results = rag_processor.collection.get(where={"chat_id": chat_id})
+    ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == source]
+    if ids:
+        rag_processor.collection.delete(ids=ids)
+        print(f"Deleted {len(ids)} chunks for source '{source}' in chat '{chat_id}' from ChromaDB.")
+        return len(ids)
+    print(f"No chunks found for source '{source}' in chat '{chat_id}'.")
     return 0
 
 def delete_all_files_from_chat(chat_id=None):
@@ -195,5 +231,13 @@ def main():
     
 if __name__ == "__main__":
     main()
-    
-__all__ = ["query_by_chat_id", "add_file_to_chat", "delete_file_from_chat", "get_files_for_chat", "delete_all_files_from_chat"]
+
+__all__ = [
+    "query_by_chat_id",
+    "add_file_to_chat",
+    "add_text_to_chat",
+    "delete_file_from_chat",
+    "delete_source_from_chat",
+    "get_files_for_chat",
+    "delete_all_files_from_chat",
+]
