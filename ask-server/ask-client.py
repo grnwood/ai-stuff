@@ -28,13 +28,15 @@ def initialize_rag():
     # Default to 'true' if setting doesn't exist
     if get_setting("enable_rag", "true") == "True":
         try:
-            from rag.rag import get_rag_processor, add_file_to_chat, get_files_for_chat, delete_file_from_chat, query_by_chat_id
+            from rag.rag import get_rag_processor, add_url_to_chat, delete_url_from_chat,  add_file_to_chat, get_files_for_chat, delete_file_from_chat, query_by_chat_id
             # Initialize the processor to trigger model loading
             get_rag_processor() 
             # Store functions for later use
             rag_functions['add_file_to_chat'] = add_file_to_chat
+            rag_functions["add_url_to_chat"] = add_url_to_chat
             rag_functions['get_files_for_chat'] = get_files_for_chat
             rag_functions['delete_file_from_chat'] = delete_file_from_chat
+            rag_functions['delete_url_from_chat'] = delete_url_from_chat
             rag_functions['query_by_chat_id'] = query_by_chat_id
             print("RAG initialized successfully.")
         except Exception as e:
@@ -532,6 +534,7 @@ class ChatApp(tk.Tk):
         self.message_history = []
         self.history_index = -1
         self.chat_files = []
+        self.chat_urls = []
         self.rag_enabled = get_setting("enable_rag", "True") == "True"
         
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
@@ -781,6 +784,7 @@ class ChatApp(tk.Tk):
                         self.show_status_message(f"Deleted {len(files_to_delete)} associated files from RAG.")
                 except Exception as e:
                     self.show_status_message(f"Error deleting RAG files: {e}")
+                
 
             delete_session_and_messages(session_id)
             self.session_tree.delete(selected_item)
@@ -1911,38 +1915,80 @@ class ChatApp(tk.Tk):
             return
 
         self.files_window = tk.Toplevel(self)
-        self.files_window.title("Attached Files")
-        self.files_window.geometry("400x300")
+        self.files_window.title("Attached RAG Resources")
+        self.files_window.geometry("600x400")
 
         self.files_window.transient(self)
         self.files_window.grab_set()
         self.files_window.protocol("WM_DELETE_WINDOW", self.close_files_dialog)
 
-        frame = ttk.Frame(self.files_window, padding="10")
-        frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ttk.Frame(self.files_window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.files_listbox = tk.Listbox(frame)
-        self.files_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 10))
+        paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        paned_window.pack(fill=tk.BOTH, expand=True)
 
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.files_listbox.yview)
-        scrollbar.pack(fill=tk.Y, side=tk.RIGHT)
-        self.files_listbox.config(yscrollcommand=scrollbar.set)
+        # --- Files Listbox ---
+        files_frame = ttk.LabelFrame(paned_window, text="Files", padding="5")
+        paned_window.add(files_frame, weight=1)
 
+        self.files_listbox = tk.Listbox(files_frame)
+        self.files_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 5))
+        files_scrollbar = ttk.Scrollbar(files_frame, orient=tk.VERTICAL, command=self.files_listbox.yview)
+        files_scrollbar.pack(fill=tk.Y, side=tk.RIGHT)
+        self.files_listbox.config(yscrollcommand=files_scrollbar.set)
+
+        # --- URLs Listbox ---
+        urls_frame = ttk.LabelFrame(paned_window, text="URLs", padding="5")
+        paned_window.add(urls_frame, weight=1)
+
+        self.urls_listbox = tk.Listbox(urls_frame)
+        self.urls_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0, 5))
+        urls_scrollbar = ttk.Scrollbar(urls_frame, orient=tk.VERTICAL, command=self.urls_listbox.yview)
+        urls_scrollbar.pack(fill=tk.Y, side=tk.RIGHT)
+        self.urls_listbox.config(yscrollcommand=urls_scrollbar.set)
+
+        # --- Button Frame ---
         button_frame = ttk.Frame(self.files_window, padding=(10,0,10,10))
         button_frame.pack(fill=tk.X)
 
-        add_button = ttk.Button(button_frame, text="Add Files", command=self.add_files_to_list)
-        add_button.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Add File", command=self.add_files_to_list).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Remove File", command=self.remove_selected_file).pack(side=tk.LEFT, padx=(0, 20))
+        
+        ttk.Button(button_frame, text="Add URL", command=self.add_url_to_list).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Remove URL", command=self.remove_selected_url).pack(side=tk.LEFT)
 
-        remove_button = ttk.Button(button_frame, text="Remove", command=self.remove_selected_file)
-        remove_button.pack(side=tk.LEFT)
-
+        # --- Context Menus ---
         self.files_listbox_menu = tk.Menu(self.files_listbox, tearoff=0)
         self.files_listbox_menu.add_command(label="Remove", command=self.remove_selected_file)
-        self.files_listbox.bind("<Button-3>", self.show_files_listbox_menu)
+        self.files_listbox.bind("<Button-3>", lambda e: self.show_resource_listbox_menu(e, 'file'))
 
-        self.update_files_listbox()
+        self.urls_listbox_menu = tk.Menu(self.urls_listbox, tearoff=0)
+        self.urls_listbox_menu.add_command(label="Remove", command=self.remove_selected_url)
+        self.urls_listbox.bind("<Button-3>", lambda e: self.show_resource_listbox_menu(e, 'url'))
+
+        self.update_resource_listboxes()
         self.create_files_listbox_tooltip()
+        self.create_urls_listbox_tooltip()
+
+    def add_url_to_list(self):
+        url = simpledialog.askstring("Add URL", "Enter the URL of the resource:")
+        if url:
+            if not rag_functions:
+                self.show_status_message("RAG functions are not available.")
+                return
+            try:
+                if not self.session_id:
+                    self.show_status_message("No active chat session. Cannot associate URL.")
+                    return
+                rag_functions['add_url_to_chat'](url, chat_id=self.session_id)
+                self.chat_urls.append(url)
+                self.update_resource_listboxes()
+                self.show_status_message(f"URL added to chat {self.session_id}.")
+            except Exception as e:
+                msg = f"Failed to add URL: {e}"
+                self.show_status_message(msg)
+                print(msg)
 
     def add_files_to_list(self):
         files = filedialog.askopenfilenames(parent=self.files_window)
@@ -1951,7 +1997,7 @@ class ChatApp(tk.Tk):
                 if file_path not in self.chat_files:
                     self.chat_files.append(file_path)
                     self.process_new_chat_file(file_path)
-            self.update_files_listbox()
+            self.update_resource_listboxes()
 
     def remove_selected_file(self):
         selection = self.files_listbox.curselection()
@@ -1968,40 +2014,93 @@ class ChatApp(tk.Tk):
                 except Exception as e:
                     self.show_status_message(f"Failed to remove file from ChromaDB: {e}")
             del self.chat_files[selected_index]
-            self.update_files_listbox()
+            self.update_resource_listboxes()
+    
+    def remove_selected_url(self):
+        selection = self.urls_listbox.curselection()
+        if selection:
+            selected_index = selection[0]
+            url = self.chat_urls[selected_index]
+            if rag_functions:
+                try:
+                    if not self.session_id:
+                        self.show_status_message("No active chat session. Cannot delete URL from RAG.")
+                    else:
+                        rag_functions['delete_url_from_chat'](url, chat_id=self.session_id)
+                        self.show_status_message(f"URL removed from chat {self.session_id}.")
+                except Exception as e:
+                    self.show_status_message(f"Failed to remove URL from ChromaDB: {e}")
+            del self.chat_urls[selected_index]
+            self.update_resource_listboxes()
 
-    def update_files_listbox(self):
+    def update_resource_listboxes(self):
         self.files_listbox.delete(0, tk.END)
         for file_path in self.chat_files:
             self.files_listbox.insert(tk.END, os.path.basename(file_path))
+        
+        self.urls_listbox.delete(0, tk.END)
+        for url in self.chat_urls:
+            self.urls_listbox.insert(tk.END, url)
 
     def create_files_listbox_tooltip(self):
         tooltip = ToolTip(self.files_listbox)
-        self.last_tooltip_index = -1
+        last_tooltip_index = -1
         def on_motion(event):
+            nonlocal last_tooltip_index
             try:
                 index = self.files_listbox.index(f"@{event.x},{event.y}")
-                if self.last_tooltip_index != index:
-                    self.last_tooltip_index = index
+                if last_tooltip_index != index:
+                    last_tooltip_index = index
                     full_path = self.chat_files[index]
                     tooltip.showtip(full_path)
             except (tk.TclError, IndexError):
-                self.last_tooltip_index = -1
+                last_tooltip_index = -1
                 tooltip.hidetip()
         
         def on_leave(event):
-            self.last_tooltip_index = -1
+            nonlocal last_tooltip_index
+            last_tooltip_index = -1
             tooltip.hidetip()
 
         self.files_listbox.bind('<Motion>', on_motion)
         self.files_listbox.bind('<Leave>', on_leave)
 
-    def show_files_listbox_menu(self, event):
+    def create_urls_listbox_tooltip(self):
+        tooltip = ToolTip(self.urls_listbox)
+        last_tooltip_index = -1
+        def on_motion(event):
+            nonlocal last_tooltip_index
+            try:
+                index = self.urls_listbox.index(f"@{event.x},{event.y}")
+                if last_tooltip_index != index:
+                    last_tooltip_index = index
+                    full_url = self.chat_urls[index]
+                    tooltip.showtip(full_url)
+            except (tk.TclError, IndexError):
+                last_tooltip_index = -1
+                tooltip.hidetip()
+        
+        def on_leave(event):
+            nonlocal last_tooltip_index
+            last_tooltip_index = -1
+            tooltip.hidetip()
+
+        self.urls_listbox.bind('<Motion>', on_motion)
+        self.urls_listbox.bind('<Leave>', on_leave)
+
+    def show_resource_listbox_menu(self, event, listbox_type):
+        if listbox_type == 'file':
+            listbox = self.files_listbox
+            menu = self.files_listbox_menu
+        else:
+            listbox = self.urls_listbox
+            menu = self.urls_listbox_menu
+            
         try:
-            selection_index = self.files_listbox.index(f"@{event.x},{event.y}")
-            self.files_listbox.selection_clear(0, tk.END)
-            self.files_listbox.selection_set(selection_index)
-            self.files_listbox_menu.post(event.x_root, event.y_root)
+            selection_index = listbox.index(f"@{event.x},{event.y}")
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(selection_index)
+            menu.post(event.x_root, event.y_root)
         except tk.TclError:
             # Click was not on an item
             pass
