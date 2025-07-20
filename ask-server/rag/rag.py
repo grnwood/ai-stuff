@@ -4,6 +4,7 @@ import requests
 import os
 import chromadb
 from dotenv import load_dotenv
+from urllib.parse import urlparse, parse_qsl
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from sentence_transformers import SentenceTransformer
 import sys
@@ -71,6 +72,32 @@ def extract_text(filepath):
     else:
         raise ValueError("Unsupported file type. Only PDF and DOCX are supported.")
 
+def add_url_to_chat(url, chat_id=None):
+    try:
+        response = requests.get(url, allow_redirects=True)
+        response.raise_for_status()
+        text = response.text
+        
+        if not text:
+            print(f"No text extracted from URL '{url}'. Skipping addition to ChromaDB.")
+            return []
+
+        chunk_size = 1000
+        chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        chunk_ids = [f"{simple_url_id(url)}_chunk_{i}" for i in range(len(chunk_texts))]
+        metadatas = [{"chat_id": chat_id, "source": url, "chunk": i, "url":"true"} for i in range(len(chunk_texts))]
+
+        get_rag_processor().collection.add(
+            documents=chunk_texts,
+            ids=chunk_ids,
+            metadatas=metadatas
+        )
+        print(f"URL '{url}' added to ChromaDB in {len(chunk_texts)} chunks.")
+        return chunk_ids
+
+    except Exception as e:
+        raise e
+    
 def add_file_to_chat(filepath, chat_id=None):
     try:
         text = extract_text(filepath)
@@ -93,7 +120,12 @@ def add_file_to_chat(filepath, chat_id=None):
 
     except Exception as e:
         print(f"Error adding file '{filepath}' to ChromaDB: {e}")
-        return []
+        raise e
+
+def delete_url_from_chromadb(url):
+    urlId = simple_url_id(url)
+    get_rag_processor().collection.delete(ids=[urlId])
+    print(f"URL '{url}' (ID: {urlId}) deleted from ChromaDB.")
 
 def delete_file_from_chromadb(filepath):
     doc_id = os.path.basename(filepath)
@@ -111,22 +143,30 @@ def delete_file_from_chat(filepath, chat_id=None):
     print(f"No chunks found for file '{filepath}' in chat '{chat_id}'.")
     return 0
 
+def delete_url_from_chat(url, chat_id=None):
+    rag_processor = get_rag_processor()
+    results = rag_processor.collection.get(where={"chat_id": chat_id})
+    ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == simple_url_id(url)]
+    if ids:
+        rag_processor.collection.delete(ids=ids)
+        print(f"Deleted {len(ids)} chunks for URL '{URL}' in chat '{chat_id}' from ChromaDB.")
+        return len(ids)
+    print(f"No chunks found for url '{url}' in chat '{chat_id}'.")
+    return 0
+
 def delete_all_files_from_chat(chat_id=None):
     if not chat_id:
         print("No chat_id provided.")
         return 0
-    
-    files = get_files_for_chat(chat_id)
-    if not files:
-        print(f"No files found for chat_id '{chat_id}'.")
-        return 0
-    
     total_deleted_chunks = 0
-    for file_path in files:
-        deleted_chunks = delete_file_from_chat(file_path, chat_id)
-        total_deleted_chunks += deleted_chunks
-        
-    print(f"Total deleted chunks for chat_id '{chat_id}': {total_deleted_chunks}")
+
+    files = get_files_for_chat(chat_id)
+    if files:
+        print(f"No files found for chat_id '{chat_id}'.")
+        for file_path in files:
+            deleted_chunks = delete_file_from_chat(file_path, chat_id)
+            total_deleted_chunks += deleted_chunks
+    
     return total_deleted_chunks
 
 def query_by_chat_id(chat_id: str, query: str, n_results: int = 5):
@@ -153,6 +193,36 @@ def get_files_for_chat(chat_id: str):
     
     return list(unique_files)
 
+def simple_url_id(url: str) -> str:
+    """
+    Create a unique-ish, safe ID from a URL using only basic Python.
+    No hashing, no external libraries. Encodes meaningfully and safely.
+    """
+    parsed = urlparse(url)
+
+    # Normalize scheme and domain
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower().replace(':', '_')
+
+    # Clean path (strip slashes, replace with underscores)
+    path = parsed.path.strip('/').replace('/', '_')
+
+    # Sort query parameters and flatten
+    query_pairs = sorted(parse_qsl(parsed.query))
+    query_part = '_'.join(f"{k}_{v}" for k, v in query_pairs)
+
+    # Build safe ID
+    parts = [scheme, netloc]
+    if path:
+        parts.append(path)
+    if query_part:
+        parts.append(query_part)
+
+    # Join parts with double underscores to avoid collisions
+    safe_id = '__'.join(parts)
+
+    return safe_id
+
 def main():
     filename = "rag/richesrestaurant.pdf"
     if os.path.exists(filename):
@@ -172,4 +242,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-__all__ = ["query_by_chat_id", "add_file_to_chat", "delete_file_from_chat", "get_files_for_chat", "delete_all_files_from_chat"]
+__all__ = ["query_by_chat_id", "add_file_to_chat", "add_url_to_chat", "delete_file_from_chat", "delete_url_from_chat", "get_files_for_chat", "delete_all_files_from_chat"]
