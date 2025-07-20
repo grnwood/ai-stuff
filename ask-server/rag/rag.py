@@ -153,7 +153,7 @@ def delete_file_from_chat(filepath, chat_id=None):
 def delete_url_from_chat(url, chat_id=None):
     rag_processor = get_rag_processor()
     results = rag_processor.collection.get(where={"chat_id": chat_id})
-    ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == simple_url_id(url)]
+    ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == url]
     if ids:
         rag_processor.collection.delete(ids=ids)
         print(f"Deleted {len(ids)} chunks for URL '{URL}' in chat '{chat_id}' from ChromaDB.")
@@ -199,6 +199,16 @@ def get_files_for_chat(chat_id: str):
     unique_files = {meta['source'] for meta in results["metadatas"] if 'source' in meta}
     
     return list(unique_files)
+
+def get_urls_for_chat(chat_id: str):
+    if not chat_id:
+        return []
+    results = get_rag_processor().collection.get(where={"chat_id": chat_id})
+
+    if not results or not results.get("metadatas"):
+        return []
+
+    return [meta['source'] for meta in results["metadatas"] if meta.get("url")]
 
 def simple_url_id(url: str) -> str:
     """
@@ -266,4 +276,13 @@ def main():
 if __name__ == "__main__":
     main()
 
-__all__ = ["query_by_chat_id", "add_file_to_chat", "add_url_to_chat", "delete_file_from_chat", "delete_url_from_chat", "get_files_for_chat", "delete_all_files_from_chat"]
+__all__ = [
+    "query_by_chat_id",
+    "add_file_to_chat",
+    "add_url_to_chat",
+    "delete_file_from_chat",
+    "delete_url_from_chat",
+    "get_files_for_chat",
+    "delete_all_files_from_chat",
+    "get_urls_for_chat",
+]
