@@ -28,13 +28,23 @@ def initialize_rag():
     # Default to 'true' if setting doesn't exist
     if get_setting("enable_rag", "true") == "True":
         try:
-            from rag.rag import get_rag_processor, add_url_to_chat, delete_url_from_chat,  add_file_to_chat, get_files_for_chat, delete_file_from_chat, query_by_chat_id
+            from rag.rag import (
+                get_rag_processor,
+                add_url_to_chat,
+                delete_url_from_chat,
+                add_file_to_chat,
+                get_files_for_chat,
+                get_urls_for_chat,
+                delete_file_from_chat,
+                query_by_chat_id,
+            )
             # Initialize the processor to trigger model loading
             get_rag_processor() 
             # Store functions for later use
             rag_functions['add_file_to_chat'] = add_file_to_chat
             rag_functions["add_url_to_chat"] = add_url_to_chat
             rag_functions['get_files_for_chat'] = get_files_for_chat
+            rag_functions['get_urls_for_chat'] = get_urls_for_chat
             rag_functions['delete_file_from_chat'] = delete_file_from_chat
             rag_functions['delete_url_from_chat'] = delete_url_from_chat
             rag_functions['query_by_chat_id'] = query_by_chat_id
@@ -1555,8 +1565,10 @@ class ChatApp(tk.Tk):
 
                 if rag_functions:
                     self.chat_files = rag_functions['get_files_for_chat'](self.session_id)
+                    self.chat_urls = rag_functions['get_urls_for_chat'](self.session_id)
                 else:
                     self.chat_files = []
+                    self.chat_urls = []
                 self.load_chat_history()
                 self.message_history = get_input_history(self.session_id)
                 self.history_index = len(self.message_history)
@@ -1731,9 +1743,9 @@ class ChatApp(tk.Tk):
         if system_prompt:
             message_blocks.insert(0, {"role": "system", "content": system_prompt})
 
-        # RAG workflow: If chat has associated files, retrieve context from ChromaDB
+        # RAG workflow: If chat has associated resources, retrieve context from ChromaDB
         context_block = None
-        if rag_functions and self.chat_files:
+        if rag_functions and (self.chat_files or self.chat_urls):
             try:
                 # Embed query and retrieve top-K relevant chunks
                 top_k = 5
@@ -2140,9 +2152,9 @@ class ChatApp(tk.Tk):
         if system_prompt:
             message_blocks.insert(0, {"role": "system", "content": system_prompt})
 
-        # RAG workflow: If chat has associated files, retrieve context from ChromaDB
+        # RAG workflow: If chat has associated resources, retrieve context from ChromaDB
         context_block = None
-        if rag_functions and self.chat_files:
+        if rag_functions and (self.chat_files or self.chat_urls):
             try:
                 top_k = 5
                 rag_results = rag_functions['query_by_chat_id'](self.session_id, content, n_results=top_k)
