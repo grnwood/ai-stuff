@@ -17,6 +17,7 @@ from PIL import Image
 from bs4 import BeautifulSoup
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "True").lower() == "true"
 
 # Add rag path to sys.path
 sys.path.append(os.path.dirname(__file__) + '/rag')
@@ -58,8 +59,19 @@ def initialize_rag():
 
 def fetch_url_text(url: str) -> str:
     """Retrieve the text content of a URL using BeautifulSoup."""
-    #headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, allow_redirects=True, timeout=10)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/114.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,/;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     return soup.get_text(separator="\n")
@@ -2006,6 +2018,17 @@ class ChatApp(tk.Tk):
             self.load_chat_history()
 
     def update_files_listbox(self):
+        if not hasattr(self, "files_listbox") or not self.files_listbox.winfo_exists():
+            return
+        self.files_listbox.delete(0, tk.END)
+        for file_path in self.chat_files:
+            if file_path.startswith("http://") or file_path.startswith("https://"):
+                display = f"URL:{file_path}"
+            else:
+                display = os.path.basename(file_path)
+            self.files_listbox.insert(tk.END, display)
+
+    def update_files_listbox2(self):
         self.files_listbox.delete(0, tk.END)
         for file_path in self.chat_files:
             if file_path.startswith("http://") or file_path.startswith("https://"):
@@ -2087,6 +2110,7 @@ class ChatApp(tk.Tk):
                 save_message(self.session_id, "assistant", f"Retrieved and stored content from {content}")
             except Exception as e:
                 save_message(self.session_id, "assistant", f"Error retrieving {content}: {e}")
+                raise e
             self.load_chat_history()
             return "break"
         
