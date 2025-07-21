@@ -33,7 +33,12 @@ class RAGProcessor:
         self.API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 
         # Load local embedding model
-        base_path = os.path.join(PROJECT_ROOT,"rag/models", "models--sentence-transformers--all-MiniLM-L6-v2", "snapshots")
+        base_path = os.path.join(
+            PROJECT_ROOT,
+            "rag", "models",
+            "models--sentence-transformers--all-MiniLM-L6-v2",
+            "snapshots"
+        )
         snapshot_ids = os.listdir(base_path)
         if not snapshot_ids:
             raise FileNotFoundError(f"No snapshot folders found in {base_path}")
