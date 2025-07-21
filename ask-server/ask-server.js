@@ -2,6 +2,8 @@ import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import fetch from 'node-fetch'
+import https from 'https'
+import fs from 'fs'
 
 dotenv.config()
 
@@ -9,6 +11,8 @@ const app = express()
 const PORT = process.env.PORT || 3000
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 const API_SECRET_TOKEN = process.env.API_SECRET_TOKEN
+const SSL_KEY_PATH = process.env.SSL_KEY_PATH
+const SSL_CERT_PATH = process.env.SSL_CERT_PATH
 
 if (!OPENAI_API_KEY || !API_SECRET_TOKEN) {
   console.error('❌ Missing OPENAI_API_KEY or API_SECRET_TOKEN in .env')
@@ -111,7 +115,17 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
-  console.log(`🚀 Proxy running with streaming at http://localhost:${PORT}`)
-})
+if (SSL_KEY_PATH && SSL_CERT_PATH) {
+  const httpsOptions = {
+    key: fs.readFileSync(SSL_KEY_PATH),
+    cert: fs.readFileSync(SSL_CERT_PATH)
+  }
+  https.createServer(httpsOptions, app).listen(PORT, () => {
+    console.log(`🚀 HTTPS Proxy running with streaming at https://localhost:${PORT}`)
+  })
+} else {
+  app.listen(PORT, () => {
+    console.log(`🚀 Proxy running with streaming at http://localhost:${PORT}`)
+  })
+}
 
