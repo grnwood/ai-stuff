@@ -67,6 +67,25 @@ def get_rag_processor():
         _rag_processor_instance = RAGProcessor()
     return _rag_processor_instance
 
+def is_rag_loaded():
+    """Return True if the RAGProcessor is currently loaded."""
+    return _rag_processor_instance is not None
+
+def unload_rag_processor():
+    """Unload the RAGProcessor and free associated resources."""
+    global _rag_processor_instance
+    if _rag_processor_instance is not None:
+        try:
+            _rag_processor_instance.chroma_client = None
+            _rag_processor_instance.collection = None
+            _rag_processor_instance.local_embedder = None
+        except Exception:
+            pass
+        _rag_processor_instance = None
+        import gc
+        gc.collect()
+        print("[RAG] RAGProcessor unloaded to free memory.")
+
 def extract_text(filepath):
     if filepath.lower().endswith(".pdf"):
         doc = fitz.open(filepath)
@@ -249,4 +268,6 @@ __all__ = [
     "delete_source_from_chat",
     "get_files_for_chat",
     "delete_all_files_from_chat",
+    "unload_rag_processor",
+    "is_rag_loaded",
 ]
