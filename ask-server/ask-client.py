@@ -560,13 +560,18 @@ class ChatApp(tk.Tk):
         
         self.title("SlipstreamAI")
         self.geometry("1000x600")
-        # Load icon for window title bar and alt-tab
+
+        # Set icon depending on platform
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(base_dir, "assets", "slipstreamAI.png")  # use full path
-        self.icon_img = PhotoImage(file=icon_path)
-        self.iconphoto(True, self.icon_img)  # ← this sets the window icon
-
-
+        icon_path = os.path.join(base_dir, "assets", "slipstreamAI.ico")  # use full path
+        if sys.platform.startswith("win"):
+            self.iconbitmap(default=icon_path)
+        else:
+            # On Linux/macOS, use PhotoImage (PNG or GIF)
+            icon_path = os.path.join(base_dir, "assets", "slipstreamAI.png")  # use full path            icon_image = tk.PhotoImage(file=icon_path)
+            self.icon_img = PhotoImage(file=icon_path)
+            self.iconphoto(True, self.icon_img)  # ← this sets the window icon
+        
         init_db()
         self.session_id = None
         self.session_name = None
