@@ -28,10 +28,7 @@ class RAGProcessor:
         # Get Env
         print("[RAG] Loading environment variables...")
         load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-
-        self.API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
-        self.API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
-
+        
         # Load local embedding model
         base_path = os.path.join(
             PROJECT_ROOT,
@@ -61,6 +58,10 @@ class RAGProcessor:
 
 _rag_processor_instance = None
 
+def wake_rag_processor():
+    """Wake up the RAGProcessor if it is not already loaded."""
+    get_rag_processor()
+    
 def get_rag_processor():
     global _rag_processor_instance
     if _rag_processor_instance is None:
@@ -270,4 +271,5 @@ __all__ = [
     "delete_all_files_from_chat",
     "unload_rag_processor",
     "is_rag_loaded",
+    "wake_rag_processor",
 ]

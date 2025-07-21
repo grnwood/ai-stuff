@@ -41,6 +41,7 @@ def initialize_rag():
                 query_by_chat_id,
                 unload_rag_processor,
                 is_rag_loaded,
+                wake_rag_processor
             )
             # Store functions for later use
             rag_functions['add_file_to_chat'] = add_file_to_chat
@@ -51,6 +52,7 @@ def initialize_rag():
             rag_functions['query_by_chat_id'] = query_by_chat_id
             rag_functions['unload_rag_processor'] = unload_rag_processor
             rag_functions['is_rag_loaded'] = is_rag_loaded
+            rag_functions['wake_rag_processor'] = wake_rag_processor
             print("RAG initialized successfully.")
         except Exception as e:
             print(f"Failed to initialize RAG: {e}")
@@ -2122,6 +2124,10 @@ class ChatApp(tk.Tk):
 
         self.input_box.delete("1.0", tk.END)
         self.update_idletasks()
+
+        # may need to wake up the RAG!
+        if rag_functions:
+          rag_functions['wake_rag_processor']()
 
         if not content or not self.session_id:
             return "break"
