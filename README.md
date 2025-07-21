@@ -147,4 +147,34 @@ You can quickly deploy the proxy server to [Render.com](https://render.com), a p
 
 Once deployed, point your SlipstreamAI client to the new proxy server URL for remote access.
 
+### Enabling HTTPS
+
+`ask-server.js` can optionally run over HTTPS. Provide the paths to your SSL key and certificate via the `SSL_KEY_PATH` and `SSL_CERT_PATH` environment variables. If both are set, the server will listen with TLS enabled.
+
+#### Self‑signed certificate
+
+For local testing you can generate a self‑signed certificate:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -nodes -keyout key.pem -out cert.pem -days 365
+```
+
+Set the variables and start the server:
+
+```bash
+export SSL_KEY_PATH=$(pwd)/key.pem
+export SSL_CERT_PATH=$(pwd)/cert.pem
+node ask-server.js
+```
+
+#### Using a real certificate
+
+On a public server you can obtain a free certificate from [Let’s Encrypt](https://letsencrypt.org/). Tools like [Certbot](https://certbot.eff.org/) automate the process:
+
+```bash
+sudo certbot certonly --standalone -d yourdomain.com
+```
+
+After issuance, set `SSL_KEY_PATH` to the private key file and `SSL_CERT_PATH` to the full chain certificate provided by Certbot. Restart `ask-server.js` and update your client’s `OPENAI_PROXY_URL` to use `https://`.
+
 ---
