@@ -72,9 +72,13 @@ def extract_text(filepath):
         doc = fitz.open(filepath)
         text = "\n".join(page.get_text() for page in doc)
         doc.close()
-        if not text and is_tesseract():
-            print(f"No text discovered, trying as a image...")
-            return extract_text_from_pdf(filepath)
+        if not text or len(text) < 10:
+            if is_tesseract():
+                print(f"No text discovered, trying as a image...")
+                return extract_text_from_pdf(filepath)
+            else:
+                print(f"No text discovered in PDF and Tesseract is not available. Returning empty string.")
+                return ""
         return text
     elif filepath.lower().endswith(".docx"):
         doc = Document(filepath)
