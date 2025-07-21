@@ -137,35 +137,17 @@ def is_rag_loaded():
 def unload_rag_processor():
     """Unload the RAGProcessor and free associated resources."""
     global _rag_processor_instance
-    if _IN_WORKER:
-        if _rag_processor_instance is not None:
-            try:
-                _rag_processor_instance.chroma_client = None
-                _rag_processor_instance.collection = None
-                _rag_processor_instance.local_embedder = None
-            except Exception:
-                pass
-            _rag_processor_instance = None
-            import gc
-            gc.collect()
-            print("[RAG] RAGProcessor unloaded to free memory.")
-    else:
-        global _rag_process, _rag_conn
-        if _rag_process is not None:
-            try:
-                _rag_conn.send(("stop", [], {}))
-                _rag_process.join(timeout=5)
-            except Exception:
-                pass
-            if _rag_process.is_alive():
-                _rag_process.terminate()
-            if _rag_conn:
-                _rag_conn.close()
-            _rag_process = None
-            _rag_conn = None
-            import gc
-            gc.collect()
-            print("[RAG] RAGProcessor subprocess terminated.")
+    if _rag_processor_instance is not None:
+        try:
+            _rag_processor_instance.chroma_client = None
+            _rag_processor_instance.collection = None
+            _rag_processor_instance.local_embedder = None
+        except Exception:
+            pass
+        _rag_processor_instance = None
+        import gc
+        gc.collect()
+        print(f"[RAG] RAGProcessor unloaded to free memory")
 
 def extract_text(filepath):
     if filepath.lower().endswith(".pdf"):

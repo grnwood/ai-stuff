@@ -1579,6 +1579,8 @@ class ChatApp(tk.Tk):
         _id, type = self.session_tree.item(selected_item, "values")
         _id = int(_id)
 
+        self.schedule_rag_unload()
+        
         if type == 'folder':
             self.session_id = None
             self.session_name = None
@@ -1825,6 +1827,7 @@ class ChatApp(tk.Tk):
             self.schedule_rag_unload()
 
         self.load_chat_history()
+        self.schedule_rag_unload()
         self.update_idletasks()
 
         try:
