@@ -18,6 +18,7 @@ load_dotenv()
 APP_NAME="SlipStreamAI"
 API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
+PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
 
 # Default database path. This may be overridden via --db on the command line
 # and can be changed at runtime from the settings window.
@@ -49,7 +50,7 @@ def save_recent_dbs(paths):
 
 def get_available_models():
     try:
-        response = requests.get(f"{API_URL}/mods", headers={"x-api-secret": API_SECRET})
+        response = requests.get(f"{API_URL}/mods", headers={"x-api-secret": API_SECRET},verify=PROXY_VERIFY_CERT)
         response.raise_for_status()
         models = response.json()
         # The structure from the proxy is already a list of model objects
@@ -276,7 +277,7 @@ def send_to_api(session_name, messages, model, current_session_id, widget=None, 
         widget.see(tk.END)
         widget.update_idletasks()
 
-    with requests.post(f"{API_URL}/v1/chat/completions", json=payload, headers=headers, stream=True) as resp:
+    with requests.post(f"{API_URL}/v1/chat/completions", json=payload, headers=headers, stream=True, verify=PROXY_VERIFY_CERT) as resp:
         resp.raise_for_status()
         assistant_full_reply = stream_and_process_response(resp, widget)
     
