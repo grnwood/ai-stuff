@@ -182,3 +182,10 @@ After issuance, set `SSL_KEY_PATH` to the private key file and `SSL_CERT_PATH` t
 TESSERACT
 If you want to install tesseract to have PDF OCR capability the the binary and the python wrapper need to be installed.
 See README-tessaract-windows.md
+add the path to the binary to the env file.
+
+
+for *nix it's easy:
+
+$ sudo apt install tesseract-ocr
+
