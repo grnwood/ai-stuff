@@ -12,3 +12,5 @@ sentence-transformers
 torch
 bs4
 pytesseract
+markdown
+
