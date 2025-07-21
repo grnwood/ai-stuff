@@ -178,3 +178,7 @@ sudo certbot certonly --standalone -d yourdomain.com
 After issuance, set `SSL_KEY_PATH` to the private key file and `SSL_CERT_PATH` to the full chain certificate provided by Certbot. Restart `ask-server.js` and update your client’s `OPENAI_PROXY_URL` to use `https://`.
 
 ---
+
+TESSERACT
+If you want to install tesseract to have PDF OCR capability the the binary and the python wrapper need to be installed.
+See README-tessaract-windows.md
