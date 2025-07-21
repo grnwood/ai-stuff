@@ -39,9 +39,9 @@ def initialize_rag():
                 delete_file_from_chat,
                 delete_source_from_chat,
                 query_by_chat_id,
+                unload_rag_processor,
+                is_rag_loaded,
             )
-            # Initialize the processor to trigger model loading
-            get_rag_processor() 
             # Store functions for later use
             rag_functions['add_file_to_chat'] = add_file_to_chat
             rag_functions['add_text_to_chat'] = add_text_to_chat
@@ -49,6 +49,8 @@ def initialize_rag():
             rag_functions['delete_file_from_chat'] = delete_file_from_chat
             rag_functions['delete_source_from_chat'] = delete_source_from_chat
             rag_functions['query_by_chat_id'] = query_by_chat_id
+            rag_functions['unload_rag_processor'] = unload_rag_processor
+            rag_functions['is_rag_loaded'] = is_rag_loaded
             print("RAG initialized successfully.")
         except Exception as e:
             print(f"Failed to initialize RAG: {e}")
@@ -82,6 +84,7 @@ APP_NAME="SlipStreamAI"
 API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
+RAG_IDLE_MINUTES = int(os.getenv("RAG_IDLE_MINUTES", "5"))
 
 # Default database path. This may be overridden via --db on the command line
 # and can be changed at runtime from the settings window.
@@ -579,6 +582,7 @@ class ChatApp(tk.Tk):
         self.history_index = -1
         self.chat_files = []
         self.rag_enabled = get_setting("enable_rag", "True") == "True"
+        self.rag_unload_after_id = None
         
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
@@ -1670,6 +1674,27 @@ class ChatApp(tk.Tk):
         self.status_bar.config(text=message)
         self.after(duration, lambda: self.status_bar.config(text=""))
 
+    def schedule_rag_unload(self):
+        if not rag_functions or not rag_functions.get('is_rag_loaded'):
+            return
+        if self.rag_unload_after_id:
+            self.after_cancel(self.rag_unload_after_id)
+        timeout_ms = RAG_IDLE_MINUTES * 60 * 1000
+        self.rag_unload_after_id = self.after(timeout_ms, self.unload_rag)
+
+    def unload_rag(self):
+        if not rag_functions or not rag_functions.get('is_rag_loaded'):
+            return
+        try:
+            rag_functions['unload_rag_processor']()
+            print("RAG unloaded to free memory...")
+            self.show_status_message("RAG unloaded to free memory...")
+            if self.session_id:
+                save_message(self.session_id, "assistant", "RAG unloaded to free memory...")
+                self.load_chat_history()
+        finally:
+            self.rag_unload_after_id = None
+
     def copy_message_from_link(self, event):
         try:
             index = self.chat_history.index(f"@{event.x},{event.y}")
@@ -1776,6 +1801,9 @@ class ChatApp(tk.Tk):
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
         if rag_functions and self.chat_files:
+            if not rag_functions['is_rag_loaded']():
+                self.show_status_message("RAG processing initializing...")
+                print("RAG processing initializing...")
             try:
                 # Embed query and retrieve top-K relevant chunks
                 top_k = 5
@@ -1792,6 +1820,7 @@ class ChatApp(tk.Tk):
                             break
             except Exception as e:
                 self.show_status_message(f"RAG context retrieval failed: {e}")
+            self.schedule_rag_unload()
 
         self.load_chat_history()
         self.update_idletasks()
@@ -1802,7 +1831,9 @@ class ChatApp(tk.Tk):
             messagebox.showerror("API Error", str(e))
 
         self.load_chat_history()
-        
+
+        self.schedule_rag_unload()
+
         item_to_select = self.find_tree_item_by_id(active_session_id)
         if item_to_select:
             self.session_tree.selection_set(item_to_select)
@@ -2082,6 +2113,7 @@ class ChatApp(tk.Tk):
                 return
             rag_functions['add_file_to_chat'](file_path, chat_id=self.session_id)
             self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
+            self.schedule_rag_unload()
         except Exception as e:
             self.show_status_message(f"Failed to embed file: {e}")
 
@@ -2106,6 +2138,9 @@ class ChatApp(tk.Tk):
             self.load_chat_history()
             self.show_status_message(f"Retrieving {content}...")
             try:
+                if not rag_functions['is_rag_loaded']():
+                    self.show_status_message("RAG processing initializing...")
+                    print("RAG processing initializing...")
                 text = fetch_url_text(content)
                 rag_functions['add_text_to_chat'](text, source=content, chat_id=self.session_id)
                 rag_functions['query_by_chat_id'](self.session_id, text, n_results=1)
@@ -2117,6 +2152,7 @@ class ChatApp(tk.Tk):
                 save_message(self.session_id, "assistant", f"Error retrieving {content}: {e}")
                 raise e
             self.load_chat_history()
+            self.schedule_rag_unload()
             return "break"
         
         messages = get_messages(self.session_id)
@@ -2129,6 +2165,9 @@ class ChatApp(tk.Tk):
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
         if rag_functions and self.chat_files:
+            if not rag_functions['is_rag_loaded']():
+                self.show_status_message("RAG processing initializing...")
+                print("RAG processing initializing...")
             try:
                 top_k = 5
                 rag_results = rag_functions['query_by_chat_id'](self.session_id, content, n_results=top_k)
@@ -2136,13 +2175,13 @@ class ChatApp(tk.Tk):
                     context_texts = [r['text'] for r in rag_results]
                     context_block = '\n---\n'.join(context_texts)
                     content_with_context = f"Context:\n{context_block}\n\nUser Query: {content}"
-                    # Replace user message in message_blocks
                     for msg in message_blocks:
                         if msg['role'] == 'user':
                             msg['content'] = content_with_context
                             break
             except Exception as e:
                 self.show_status_message(f"RAG context retrieval failed: {e}")
+            self.schedule_rag_unload()
 
         self.load_chat_history()
         
@@ -2160,6 +2199,8 @@ class ChatApp(tk.Tk):
         # Auto-summarize session name after a few messages
         if len(messages) % 5 == 0 and len(messages) > 0:
             self.summarize_and_rename_session()
+
+        self.schedule_rag_unload()
 
         return "break"
 
