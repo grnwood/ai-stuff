@@ -8,8 +8,6 @@ import chromadb
 from dotenv import load_dotenv
 from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from sentence_transformers import SentenceTransformer
-import sys
-import multiprocessing
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
