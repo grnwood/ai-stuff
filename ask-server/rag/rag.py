@@ -10,6 +10,8 @@ from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from sentence_transformers import SentenceTransformer
 import sys
 import multiprocessing
+import torch
+import gc
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -145,8 +147,22 @@ def unload_rag_processor():
         except Exception:
             pass
         _rag_processor_instance = None
-        import gc
+        # If you're using PyTorch model under the hood
+        if 'model' in globals():
+            del model
+
+        # Delete anything else holding references
+        for name in dir():
+            if name.startswith("model") or "transformer" in name:
+                del globals()[name]
+
+        # Force garbage collection
         gc.collect()
+
+        # If using GPU (optional)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
         print(f"[RAG] RAGProcessor unloaded to free memory")
 
 def extract_text(filepath):
