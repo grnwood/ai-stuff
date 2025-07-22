@@ -632,17 +632,22 @@ class ChatApp(tk.Tk):
 
         def restart():
             python_exe = sys.executable
+
             if getattr(sys, 'frozen', False):
-                script_path = sys.executable
+                script_path = sys.executable  # For PyInstaller builds
             else:
                 script_path = os.path.abspath(__file__)
-            args = [python_exe, script_path, '--db', db_path]
+
+            # Quote the db_path to ensure spaces are handled correctly
+            quoted_db_path = shlex.quote(db_path) if os.name != 'nt' else f'"{db_path}"'
+
+            args = [python_exe, script_path, '--db', quoted_db_path]
+
             print("Restarting with:", args)
-            self.destroy()  # Close the current app window
+            self.destroy()
             os.execl(python_exe, *args)
 
         self.after(100, restart)
-
     
     def on_model_selected(self, event):
         if self.session_id:
