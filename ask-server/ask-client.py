@@ -1789,12 +1789,7 @@ class ChatApp(tk.Tk):
             messagebox.showinfo("Action", "Please select a session first.")
             return
 
-        # Wake up the RAG if needed....
-        if get_setting("enable_rag", "true") == "True" and not rag_functions['is_rag_loaded']():
-            self.show_status_message("RAG processing idle, reloading...")
-            print(f"RAG processing idle, reloading...")
-            rag_functions['wake_rag_processor']()
-             
+            
         active_session_id = self.session_id
         save_message(self.session_id, "user", prompt_content)
         save_input_history(self.session_id, prompt_content)
@@ -2133,12 +2128,6 @@ class ChatApp(tk.Tk):
 
         self.input_box.delete("1.0", tk.END)
         self.update_idletasks()
-
-        # Wake up the RAG if needed....
-        if get_setting("enable_rag", "true") == "True" and not rag_functions['is_rag_loaded']():
-            self.show_status_message("RAG processing idle, reloading...")
-            print(f"RAG processing idle, reloading...")
-            rag_functions['wake_rag_processor']()
 
         if not content or not self.session_id:
             return "break"
