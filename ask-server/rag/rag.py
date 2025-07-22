@@ -138,7 +138,20 @@ def is_rag_loaded():
 
 def unload_rag_processor():
     """Unload the RAGProcessor and free associated resources."""
-    global _rag_processor_instance
+    global _rag_processor_instance, _rag_process, _rag_conn
+    if not _IN_WORKER:
+        # Called from the main process - instruct worker to stop
+        if _rag_conn is not None:
+            try:
+                _rag_conn.send(("stop", (), {}))
+            except Exception:
+                pass
+        if _rag_process is not None:
+            _rag_process.join()
+        _rag_process = None
+        _rag_conn = None
+        return
+
     if _rag_processor_instance is not None:
         try:
             _rag_processor_instance.chroma_client = None
