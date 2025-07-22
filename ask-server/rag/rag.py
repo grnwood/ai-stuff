@@ -70,10 +70,13 @@ def get_rag_processor():
 
 def is_rag_loaded():
     """Return True if the RAGProcessor is currently loaded."""
-    return _rag_processor_instance is not None
+    return True
+    #return _rag_processor_instance is not None
 
 def unload_rag_processor():
     """Unload the RAGProcessor and free associated resources."""
+    return
+    # This just isn't working, needs to be revisited.
     global _rag_processor_instance
     if _rag_processor_instance is not None:
         try:

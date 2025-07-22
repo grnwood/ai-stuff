@@ -1687,6 +1687,9 @@ class ChatApp(tk.Tk):
         self.rag_unload_after_id = self.after(timeout_ms, self.unload_rag)
 
     def unload_rag(self):
+        # this just doesn't work, revisit later.
+        return
+        
         if not rag_functions or not rag_functions.get('is_rag_loaded'):
             return
         try:
