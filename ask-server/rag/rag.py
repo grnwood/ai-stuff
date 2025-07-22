@@ -176,7 +176,7 @@ def add_file_to_chat(filepath, chat_id=None):
             if text:
                 chunk_size = 1000
                 chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                chunk_ids = [f"{os.path.basename(filepath)}_chunk_{i}" for i in range(len(chunk_texts))]
+                chunk_ids = [f"{chat_id}_{os.path.basename(filepath)}_chunk_{i}" for i in range(len(chunk_texts))]
                 metadatas = [{"chat_id": chat_id, "source": filepath, "chunk": i} for i in range(len(chunk_texts))]
 
                 get_rag_processor().collection.add(
@@ -203,7 +203,7 @@ def add_text_to_chat(text, source, chat_id=None):
             if text:
                 chunk_size = 1000
                 chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                chunk_ids = [f"{source}_chunk_{i}" for i in range(len(chunk_texts))]
+                chunk_ids = [f"{chat_id}_{source}_chunk_{i}" for i in range(len(chunk_texts))]
                 metadatas = [{"chat_id": chat_id, "source": source, "chunk": i} for i in range(len(chunk_texts))]
 
                 get_rag_processor().collection.add(
