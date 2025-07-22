@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
 from bs4 import BeautifulSoup
+import platform
+import shlex
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "True").lower() == "true"
@@ -616,18 +618,30 @@ class ChatApp(tk.Tk):
         self.current_input_buffer = ""
 
     def restart_app_with_db(self, db_path):
-        """Restart the entire application with a new database path."""
+        """Restart the entire application with a new database path, safely across platforms."""
         global DB_PATH, RECENT_DBS
         if not db_path:
             return
+
         DB_PATH = db_path
         if db_path in RECENT_DBS:
             RECENT_DBS.remove(db_path)
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
-        self.after(100, lambda: os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path))
 
+        def restart():
+            python_exe = sys.executable
+            script_path = os.path.abspath(__file__)
+
+            # Use shlex.quote for safety on Linux; Windows doesn't need it but is tolerant
+            args = [python_exe, script_path, '--db', db_path]
+
+            print("Restarting with:", args)
+            os.execl(python_exe, *args)
+
+        self.after(100, restart)
+    
     def on_model_selected(self, event):
         if self.session_id:
             selected_model = self.model_var.get()
