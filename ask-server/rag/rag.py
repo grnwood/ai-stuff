@@ -70,39 +70,33 @@ def get_rag_processor():
 
 def is_rag_loaded():
     """Return True if the RAGProcessor is currently loaded."""
-    return True
-    #return _rag_processor_instance is not None
+    global _rag_processor_instance
+    return _rag_processor_instance is not None
 
 def unload_rag_processor():
     """Unload the RAGProcessor and free associated resources."""
-    return
-    # This just isn't working, needs to be revisited.
     global _rag_processor_instance
-    if _rag_processor_instance is not None:
-        try:
-            _rag_processor_instance.chroma_client = None
-            _rag_processor_instance.collection = None
-            _rag_processor_instance.local_embedder = None
-        except Exception:
-            pass
-        _rag_processor_instance = None
-        # If you're using PyTorch model under the hood
-        if 'model' in globals():
-            del model
+    if _rag_processor_instance is None:
+        return
 
-        # Delete anything else holding references
-        for name in dir():
-            if name.startswith("model") or "transformer" in name:
-                del globals()[name]
+    try:
+        _rag_processor_instance.chroma_client = None
+        _rag_processor_instance.collection = None
+        _rag_processor_instance.local_embedder = None
+    except Exception:
+        pass
 
-        # Force garbage collection
-        gc.collect()
+    _rag_processor_instance = None
 
-        # If using GPU (optional)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-        print(f"[RAG] RAGProcessor unloaded to free memory")
+    # Force garbage collection of Python objects
+    gc.collect()
+
+    # Clear GPU memory if available
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+    print("[RAG] RAGProcessor unloaded to free memory")
 
 def extract_text(filepath):
     if filepath.lower().endswith(".pdf"):

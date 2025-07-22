@@ -1687,18 +1687,17 @@ class ChatApp(tk.Tk):
         self.rag_unload_after_id = self.after(timeout_ms, self.unload_rag)
 
     def unload_rag(self):
-        # this just doesn't work, revisit later.
-        return
-        
-        if not rag_functions or not rag_functions.get('is_rag_loaded'):
+        if not rag_functions:
             return
+
         try:
-            rag_functions['unload_rag_processor']()
-            print("RAG unloaded to free memory...")
-            self.show_status_message("RAG unloaded to free memory...")
-            if self.session_id:
-                save_message(self.session_id, "assistant", "RAG unloaded to free memory...")
-                self.load_chat_history()
+            if rag_functions['is_rag_loaded']():
+                rag_functions['unload_rag_processor']()
+                print("RAG unloaded to free memory...")
+                self.show_status_message("RAG unloaded to free memory...")
+                if self.session_id:
+                    save_message(self.session_id, "assistant", "RAG unloaded to free memory...")
+                    self.load_chat_history()
         finally:
             self.rag_unload_after_id = None
 
