@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
 from bs4 import BeautifulSoup
+import tracemalloc
+import gc
+import shlex
+import platform
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "True").lower() == "true"
@@ -24,6 +28,17 @@ sys.path.append(os.path.dirname(__file__) + '/rag')
 
 # Global variable for RAG functions, populated by initialize_rag
 rag_functions = {}
+
+def show_memory_snapshot():
+    return
+    print("Running garbage collection...")
+    gc.collect()
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+
+    print("\n[ Top 10 memory allocations ]")
+    for stat in top_stats[:10]:
+        print(stat)
 
 def initialize_rag():
     """Initializes RAG functions if enabled in settings."""
@@ -616,17 +631,29 @@ class ChatApp(tk.Tk):
         self.current_input_buffer = ""
 
     def restart_app_with_db(self, db_path):
-        """Restart the entire application with a new database path."""
+        """Restart the entire application with a new database path, safely across platforms."""
         global DB_PATH, RECENT_DBS
         if not db_path:
             return
+
         DB_PATH = db_path
         if db_path in RECENT_DBS:
             RECENT_DBS.remove(db_path)
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
-        self.after(100, lambda: os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path))
+
+    def restart():
+        python_exe = sys.executable
+        script_path = os.path.abspath(__file__)
+
+        # Use shlex.quote for safety on Linux; Windows doesn't need it but is tolerant
+        args = [python_exe, script_path, '--db', db_path]
+
+        print("Restarting with:", args)
+        os.execl(python_exe, *args)
+
+        self.after(100, restart)
 
     def on_model_selected(self, event):
         if self.session_id:
@@ -1691,6 +1718,8 @@ class ChatApp(tk.Tk):
             return
         try:
             rag_functions['unload_rag_processor']()
+            self.chat_files = []
+            rag_functions.clear()
             print("RAG unloaded to free memory...")
             self.show_status_message("RAG unloaded to free memory...")
             if self.session_id:
@@ -2342,7 +2371,9 @@ def main():
     # Now initialize RAG based on settings
     initialize_rag()
     app = ChatApp()
+    show_memory_snapshot()
     app.mainloop()
 
 if __name__ == "__main__":
+    tracemalloc.start()
     main()

@@ -1,18 +1,44 @@
-import fitz
-from docx import Document
-import requests
-from ocr.tesseract import is_tesseract
-from ocr.tesseract import extract_text_from_pdf
 import os
-import chromadb
-from dotenv import load_dotenv
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
-from sentence_transformers import SentenceTransformer
 import sys
+import fitz
+import gc
+import psutil
+import tracemalloc
+import requests
 import multiprocessing
+from docx import Document
+from dotenv import load_dotenv
+from ocr.tesseract import is_tesseract, extract_text_from_pdf
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+_rag_processor_instance = None
+_rag_process = None
+_rag_conn = None
+_IN_WORKER = False
+
+# --------------------------------------------------
+# Memory + Diagnostic Helpers
+# --------------------------------------------------
+def show_memory_snapshot():
+    print("Running garbage collection...")
+    gc.collect()
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+
+    print("\n[ Top 10 memory allocations ]")
+    for stat in top_stats[:10]:
+        print(stat)
+
+def log_memory_usage():
+    process = psutil.Process(os.getpid())
+    rss_mb = process.memory_info().rss / 1024 / 1024
+    print(f"[Memory] RSS: {rss_mb:.2f} MB")
+
+# --------------------------------------------------
+# RAGProcessor definition (used only in subprocess)
+# --------------------------------------------------
 class LocalEmbeddingFunction(EmbeddingFunction):
     def __init__(self, model):
         self.model = model
@@ -26,11 +52,12 @@ class RAGProcessor:
         self.load_model_and_db()
 
     def load_model_and_db(self):
-        # Get Env
+        from sentence_transformers import SentenceTransformer
+        import chromadb
+
         print("[RAG] Loading environment variables...")
         load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-        
-        # Load local embedding model
+
         base_path = os.path.join(
             PROJECT_ROOT,
             "rag", "models",
@@ -42,13 +69,11 @@ class RAGProcessor:
             raise FileNotFoundError(f"No snapshot folders found in {base_path}")
         snapshot_id = snapshot_ids[0]
         model_path = os.path.join(base_path, snapshot_id)
-        
-        print(f"[RAG] Loading local embedding model (sentence-transformers/all-MiniLM-L6-v2)...{snapshot_id}")
+
+        print(f"[RAG] Loading local embedding model... {snapshot_id}")
         self.local_embedder = SentenceTransformer(model_path)
-        
         embedding_function = LocalEmbeddingFunction(self.local_embedder)
 
-        # Initialize ChromaDB client
         print("[RAG] Initializing ChromaDB persistent client and collection...")
         self.chroma_client = chromadb.PersistentClient(path="./chroma_store")
         self.collection = self.chroma_client.get_or_create_collection(
@@ -56,41 +81,39 @@ class RAGProcessor:
             embedding_function=embedding_function
         )
         print("[RAG] RAGProcessor initialized successfully.")
+        show_memory_snapshot()
 
-_rag_processor_instance = None
-
-# Globals for managing the background RAG subprocess
-_rag_process = None
-_rag_conn = None
-_IN_WORKER = False
-
+# --------------------------------------------------
+# Background Process and Messaging
+# --------------------------------------------------
 def _worker_loop(conn):
-    """Entry point for the background RAG process."""
-    global _IN_WORKER
+    global _IN_WORKER, _rag_processor_instance
     _IN_WORKER = True
     while True:
         try:
             cmd, args, kwargs = conn.recv()
         except EOFError:
             break
+
         if cmd == "stop":
             unload_rag_processor()
+            conn.send(True)
             break
-        elif cmd == "wake":
-            wake_rag_processor()
+        elif cmd == "load":
+            get_rag_processor()
             conn.send(True)
         elif cmd == "add_file_to_chat":
             conn.send(add_file_to_chat(*args, **kwargs))
         elif cmd == "add_text_to_chat":
             conn.send(add_text_to_chat(*args, **kwargs))
+        elif cmd == "query_by_chat_id":
+            conn.send(query_by_chat_id(*args, **kwargs))
         elif cmd == "delete_file_from_chat":
             conn.send(delete_file_from_chat(*args, **kwargs))
         elif cmd == "delete_source_from_chat":
             conn.send(delete_source_from_chat(*args, **kwargs))
         elif cmd == "delete_all_files_from_chat":
             conn.send(delete_all_files_from_chat(*args, **kwargs))
-        elif cmd == "query_by_chat_id":
-            conn.send(query_by_chat_id(*args, **kwargs))
         elif cmd == "get_files_for_chat":
             conn.send(get_files_for_chat(*args, **kwargs))
         elif cmd == "is_rag_loaded":
@@ -99,9 +122,7 @@ def _worker_loop(conn):
             conn.send(None)
     conn.close()
 
-
 def _start_rag_process():
-    """Ensure the background process is running."""
     global _rag_process, _rag_conn
     if _rag_process is None or not _rag_process.is_alive():
         parent_conn, child_conn = multiprocessing.Pipe()
@@ -109,19 +130,24 @@ def _start_rag_process():
         _rag_process.start()
         _rag_conn = parent_conn
 
-
 def _send_cmd(cmd, *args, **kwargs):
     _start_rag_process()
     _rag_conn.send((cmd, args, kwargs))
     return _rag_conn.recv()
 
-def wake_rag_processor():
-    """Wake up the RAGProcessor if it is not already loaded."""
-    if _IN_WORKER:
-        get_rag_processor()
-    else:
-        _send_cmd("wake")
-    
+def stop_rag_processor():
+    global _rag_process, _rag_conn
+    if _rag_conn:
+        try:
+            _send_cmd("stop")
+        except Exception as e:
+            print(f"[RAG] stop command failed: {e}")
+        _rag_conn.close()
+        _rag_process.join()
+        _rag_process = None
+        _rag_conn = None
+        print("[RAG] Subprocess terminated.")
+
 def get_rag_processor():
     global _rag_processor_instance
     if _rag_processor_instance is None:
@@ -129,99 +155,88 @@ def get_rag_processor():
     return _rag_processor_instance
 
 def is_rag_loaded():
-    """Return True if the RAGProcessor is currently loaded."""
-    if _IN_WORKER:
-        return _rag_processor_instance is not None
-    return _send_cmd("is_rag_loaded")
+    return _send_cmd("is_rag_loaded") if not _IN_WORKER else _rag_processor_instance is not None
+
+def wake_rag_processor():
+    return _send_cmd("load")
 
 def unload_rag_processor():
-    """Unload the RAGProcessor and free associated resources."""
     global _rag_processor_instance
-    if _rag_processor_instance is not None:
-        try:
-            _rag_processor_instance.chroma_client = None
-            _rag_processor_instance.collection = None
-            _rag_processor_instance.local_embedder = None
-        except Exception:
-            pass
-        _rag_processor_instance = None
-        import gc
-        gc.collect()
-        print(f"[RAG] RAGProcessor unloaded to free memory")
+    print("[RAG] Attempting to unload RAGProcessor...")
 
+    try:
+        if _rag_processor_instance is not None:
+            if hasattr(_rag_processor_instance, "local_embedder"):
+                del _rag_processor_instance.local_embedder
+            if hasattr(_rag_processor_instance, "collection"):
+                del _rag_processor_instance.collection
+            if hasattr(_rag_processor_instance, "chroma_client"):
+                del _rag_processor_instance.chroma_client
+            _rag_processor_instance = None
+
+    except Exception as e:
+        print(f"[RAG] Unexpected error during unload: {e}")
+
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except ImportError:
+        pass
+
+    log_memory_usage()
+    show_memory_snapshot()
+    print("[RAG] RAGProcessor fully unloaded.")
+
+# --------------------------------------------------
+# Public-facing functions for embedding and querying
+# --------------------------------------------------
 def extract_text(filepath):
     if filepath.lower().endswith(".pdf"):
         doc = fitz.open(filepath)
         text = "\n".join(page.get_text() for page in doc)
         doc.close()
         if not text or len(text) < 10:
-            if is_tesseract():
-                print(f"No text discovered, trying as a image...")
-                return extract_text_from_pdf(filepath)
-            else:
-                print(f"No text discovered in PDF and Tesseract is not available. Returning empty string.")
-                return ""
+            return extract_text_from_pdf(filepath) if is_tesseract() else ""
         return text
     elif filepath.lower().endswith(".docx"):
         doc = Document(filepath)
-        text = "\n".join([p.text for p in doc.paragraphs])
-        return text
+        return "\n".join(p.text for p in doc.paragraphs)
     else:
         raise ValueError("Unsupported file type. Only PDF and DOCX are supported.")
 
 def add_file_to_chat(filepath, chat_id=None):
     if _IN_WORKER:
-        try:
-            text = extract_text(filepath)
-            if text:
-                chunk_size = 1000
-                chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                chunk_ids = [f"{chat_id}_{os.path.basename(filepath)}_chunk_{i}" for i in range(len(chunk_texts))]
-                metadatas = [{"chat_id": chat_id, "source": filepath, "chunk": i} for i in range(len(chunk_texts))]
-
-                get_rag_processor().collection.add(
-                    documents=chunk_texts,
-                    ids=chunk_ids,
-                    metadatas=metadatas
-                )
-                print(f"File '{filepath}' added to ChromaDB in {len(chunk_texts)} chunks.")
-                return chunk_ids
-            else:
-                print(f"No text extracted from file '{filepath}'. Skipping addition to ChromaDB.")
-            return []
-
-        except Exception as e:
-            print(f"Error adding file '{filepath}' to ChromaDB: {e}")
-            return []
-    else:
-        return _send_cmd("add_file_to_chat", filepath, chat_id=chat_id)
+        text = extract_text(filepath)
+        if text:
+            chunk_size = 1000
+            chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            ids = [f"{chat_id}_{os.path.basename(filepath)}_chunk_{i}" for i in range(len(chunks))]
+            metadatas = [{"chat_id": chat_id, "source": filepath, "chunk": i} for i in range(len(chunks))]
+            get_rag_processor().collection.add(documents=chunks, ids=ids, metadatas=metadatas)
+            return ids
+        return []
+    return _send_cmd("add_file_to_chat", filepath, chat_id=chat_id)
 
 def add_text_to_chat(text, source, chat_id=None):
-    """Embed arbitrary text into ChromaDB with an associated source string."""
     if _IN_WORKER:
-        try:
-            if text:
-                chunk_size = 1000
-                chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                chunk_ids = [f"{chat_id}_{source}_chunk_{i}" for i in range(len(chunk_texts))]
-                metadatas = [{"chat_id": chat_id, "source": source, "chunk": i} for i in range(len(chunk_texts))]
+        if text:
+            chunk_size = 1000
+            chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            ids = [f"{chat_id}_{source}_chunk_{i}" for i in range(len(chunks))]
+            metadatas = [{"chat_id": chat_id, "source": source, "chunk": i} for i in range(len(chunks))]
+            get_rag_processor().collection.add(documents=chunks, ids=ids, metadatas=metadatas)
+            return ids
+        return []
+    return _send_cmd("add_text_to_chat", text, source, chat_id=chat_id)
 
-                get_rag_processor().collection.add(
-                    documents=chunk_texts,
-                    ids=chunk_ids,
-                    metadatas=metadatas
-                )
-                print(f"Text from '{source}' added to ChromaDB in {len(chunk_texts)} chunks.")
-                return chunk_ids
-            else:
-                print(f"No text provided for source '{source}'. Skipping addition to ChromaDB.")
-                return []
-
-        except Exception as e:
-            print(f"Error adding text for source '{source}' to ChromaDB: {e}")
-            return []
-    else:
-        return _send_cmd("add_text_to_chat", text, source, chat_id=chat_id)
+def query_by_chat_id(chat_id, query, n_results=5):
+    if _IN_WORKER:
+        results = get_rag_processor().collection.query(query_texts=[query], n_results=n_results, where={"chat_id": chat_id})
+        return [{"text": d, "metadata": m} for d, m in zip(results.get("documents", [[]])[0], results.get("metadatas", [[]])[0])]
+    return _send_cmd("query_by_chat_id", chat_id, query, n_results=n_results)
 
 def delete_file_from_chromadb(filepath):
     doc_id = os.path.basename(filepath)
@@ -293,20 +308,12 @@ def query_by_chat_id(chat_id: str, query: str, n_results: int = 5):
     else:
         return _send_cmd("query_by_chat_id", chat_id, query, n_results=n_results)
 
-def get_files_for_chat(chat_id: str):
+
+def get_files_for_chat(chat_id):
     if _IN_WORKER:
-        if not chat_id:
-            return []
         results = get_rag_processor().collection.get(where={"chat_id": chat_id})
-
-        if not results or not results.get("metadatas"):
-            return []
-
-        unique_files = {meta['source'] for meta in results["metadatas"] if 'source' in meta}
-
-        return list(unique_files)
-    else:
-        return _send_cmd("get_files_for_chat", chat_id)
+        return list({meta['source'] for meta in results.get("metadatas", []) if 'source' in meta})
+    return _send_cmd("get_files_for_chat", chat_id)
 
 def main():
     filename = os.path.join(PROJECT_ROOT, "rag", "richesrestaurant.pdf")
