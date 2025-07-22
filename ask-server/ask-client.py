@@ -632,15 +632,17 @@ class ChatApp(tk.Tk):
 
         def restart():
             python_exe = sys.executable
-            script_path = os.path.abspath(__file__)
-
-            # Use shlex.quote for safety on Linux; Windows doesn't need it but is tolerant
+            if getattr(sys, 'frozen', False):
+                script_path = sys.executable
+            else:
+                script_path = os.path.abspath(__file__)
             args = [python_exe, script_path, '--db', db_path]
-
             print("Restarting with:", args)
+            self.destroy()  # Close the current app window
             os.execl(python_exe, *args)
 
         self.after(100, restart)
+
     
     def on_model_selected(self, event):
         if self.session_id:
