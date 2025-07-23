@@ -882,19 +882,60 @@ class ChatApp(tk.Tk):
         self.left_frame = ttk.Frame(self.left_paned_window, width=200)
         self.left_paned_window.add(self.left_frame, weight=1)
         self.left_frame.columnconfigure(0, weight=1)
-        self.left_frame.rowconfigure(2, weight=1)
+        self.left_frame.rowconfigure(4, weight=1)
 
+        # --- Database Selection ---
+        self.db_label = ttk.Label(self.left_frame, text="Database:")
+        self.db_label.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
+        self.db_var = tk.StringVar(value=DB_PATH)
+
+        def choose_db_file():
+            path = filedialog.askopenfilename(filetypes=[("DB files", "*.db"), ("All files", "*.*")])
+            if path:
+                self.db_var.set(path)
+
+        all_paths = ['New...'] + RECENT_DBS + [DB_PATH]
+        max_len = max(len(str(p)) for p in all_paths)
+        self.db_dropdown = ttk.Combobox(self.left_frame, textvariable=self.db_var, state="readonly",
+                                       width=max(30, min(80, max_len)))
+        self.db_dropdown['values'] = ['New...'] + RECENT_DBS
+        self.db_dropdown.grid(row=1, column=0, sticky="ew", padx=10)
+        ttk.Button(self.left_frame, image=self.folder_icon, command=choose_db_file).grid(row=1, column=1, sticky="w", padx=5)
+
+        create_tooltip(self.db_dropdown, lambda: self.db_var.get())
+
+        def on_db_change(*args):
+            selected = self.db_var.get()
+            if selected == 'New...':
+                new_path = filedialog.asksaveasfilename(defaultextension='.db',
+                                                        filetypes=[('DB files', '*.db'), ('All files', '*.*')])
+                if not new_path:
+                    self.db_var.set(DB_PATH)
+                    return
+                try:
+                    sqlite3.connect(new_path).close()
+                except Exception as e:
+                    messagebox.showerror('Error', f'Could not create database:\n{e}')
+                    self.db_var.set(DB_PATH)
+                    return
+                self.restart_app_with_db(new_path)
+            elif selected and selected != DB_PATH:
+                self.restart_app_with_db(selected)
+
+        self.db_var.trace_add('write', on_db_change)
+
+        # --- Model Selection ---
         self.model_label = ttk.Label(self.left_frame, text="Select Model:")
-        self.model_label.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
+        self.model_label.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 5))
         self.model_var = tk.StringVar()
         self.model_dropdown = ttk.Combobox(self.left_frame, textvariable=self.model_var, state="readonly")
-        self.model_dropdown.grid(row=1, column=0, sticky="ew", padx=10, pady=2)
+        self.model_dropdown.grid(row=3, column=0, sticky="ew", padx=10, pady=2)
         self.model_dropdown['values'] = get_available_models()
         self.model_dropdown.set("gpt-3.5-turbo")
         self.model_dropdown.bind('<<ComboboxSelected>>', self.on_model_selected)
 
         self.session_tree = ttk.Treeview(self.left_frame, show="tree")
-        self.session_tree.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        self.session_tree.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
         self.session_tree.bind('<<TreeviewSelect>>', self.select_session)
         self.session_tree.bind('<Button-3>', self.show_session_context_menu)
         self.session_tree.bind("<B1-Motion>", self.move_item)
@@ -921,16 +962,16 @@ class ChatApp(tk.Tk):
         self.whitespace_context_menu.add_command(label="New Folder", command=lambda: self.new_folder(parent_id=None))
 
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
-        self.new_button.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 2))
+        self.new_button.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 2))
 
         self.export_button = ttk.Button(self.left_frame, text="Export Chat", command=self.export_chat)
-        self.export_button.grid(row=4, column=0, sticky="ew", padx=10, pady=2)
+        self.export_button.grid(row=6, column=0, sticky="ew", padx=10, pady=2)
 
         self.import_button = ttk.Button(self.left_frame, text="Import Chat", command=self.import_chat)
-        self.import_button.grid(row=5, column=0, sticky="ew", padx=10, pady=2)
+        self.import_button.grid(row=7, column=0, sticky="ew", padx=10, pady=2)
 
         self.settings_button = ttk.Button(self.left_frame, text="Settings", command=self.open_settings)
-        self.settings_button.grid(row=6, column=0, sticky="ew", padx=10, pady=(2, 10))
+        self.settings_button.grid(row=8, column=0, sticky="ew", padx=10, pady=(2, 10))
 
         # --- Main Chat Area ---
         self.main_frame = ttk.Frame(self.left_paned_window)
@@ -1288,56 +1329,8 @@ class ChatApp(tk.Tk):
                 if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
                     widget.configure(style="Dark.TLabel")
 
-        # --- Database selection ---
-        ttk.Label(settings_win, text="Chat Database:").grid(row=0, column=0, sticky="w", pady=5, padx=20)
-        db_var = tk.StringVar(value=DB_PATH)
-
-        def choose_db_file():
-            path = filedialog.askopenfilename(filetypes=[("DB files", "*.db"), ("All files", "*.*")])
-            if path:
-                db_var.set(path)
-
-        db_frame = ttk.Frame(settings_win)
-        db_frame.grid(row=1, column=0, sticky="w", padx=20)
-        # Calculate dropdown width based on longest path
-        all_paths = ['New...'] + RECENT_DBS + [DB_PATH]
-        max_len = max(len(str(p)) for p in all_paths)
-        db_dropdown = ttk.Combobox(db_frame, textvariable=db_var, state="readonly", width=max(30, min(80, max_len)))
-        db_dropdown['values'] = ['New...'] + RECENT_DBS
-        db_dropdown.grid(row=0, column=0, sticky="w")
-        ttk.Button(db_frame, image=self.folder_icon, command=choose_db_file).grid(row=0, column=1, sticky="w", padx=5)
-
-        # Add tooltip to show full path on hover
-        def db_tooltip_text():
-            return db_var.get()
-        create_tooltip(db_dropdown, db_tooltip_text)
-
-        def on_db_change(*args):
-            selected = db_var.get()
-            if selected == 'New...':
-                new_path = filedialog.asksaveasfilename(
-                    defaultextension='.db',
-                    filetypes=[('DB files', '*.db'), ('All files', '*.*')]
-                )
-                if not new_path:
-                    db_var.set(DB_PATH)
-                    return
-                try:
-                    sqlite3.connect(new_path).close()
-                except Exception as e:
-                    messagebox.showerror('Error', f'Could not create database:\n{e}')
-                    db_var.set(DB_PATH)
-                    return
-                settings_win.destroy()
-                self.restart_app_with_db(new_path)
-            elif selected and selected != DB_PATH:
-                settings_win.destroy()
-                self.restart_app_with_db(selected)
-
-        db_var.trace_add('write', on_db_change)
-        
         # Theme settings
-        ttk.Label(settings_win, text="Theme:").grid(row=2, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Theme:").grid(row=0, column=0, sticky="w", pady=5, padx=20)
         
         def on_theme_change():
             save_setting("theme", self.theme.get())
@@ -1356,13 +1349,13 @@ class ChatApp(tk.Tk):
 
 
         light_radio = ttk.Radiobutton(settings_win, text="Light", variable=self.theme, value="light", command=on_theme_change)
-        light_radio.grid(row=3, column=0, sticky="w", padx=20)
-        
+        light_radio.grid(row=1, column=0, sticky="w", padx=20)
+
         dark_radio = ttk.Radiobutton(settings_win, text="Dark", variable=self.theme, value="dark", command=on_theme_change)
-        dark_radio.grid(row=4, column=0, sticky="w", padx=20)
+        dark_radio.grid(row=2, column=0, sticky="w", padx=20)
 
         # Default model settings
-        ttk.Label(settings_win, text="Default Model:").grid(row=5, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Default Model:").grid(row=3, column=0, sticky="w", pady=5, padx=20)
         
         default_model_var = tk.StringVar(value=get_setting("default_model", "gpt-3.5-turbo"))
         
@@ -1371,11 +1364,11 @@ class ChatApp(tk.Tk):
 
         default_model_dropdown = ttk.Combobox(settings_win, textvariable=default_model_var, state="readonly")
         default_model_dropdown['values'] = get_available_models()
-        default_model_dropdown.grid(row=6, column=0, sticky="ew", padx=20)
+        default_model_dropdown.grid(row=4, column=0, sticky="ew", padx=20)
         default_model_var.trace_add("write", on_default_model_change)
 
         # Chat font settings
-        ttk.Label(settings_win, text="Chat Font:").grid(row=7, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Chat Font:").grid(row=5, column=0, sticky="w", pady=5, padx=20)
         
         def on_font_change(*args):
             save_setting("chat_font", self.chat_font.get())
@@ -1383,43 +1376,43 @@ class ChatApp(tk.Tk):
 
         font_families = sorted(font.families())
         font_dropdown = ttk.Combobox(settings_win, textvariable=self.chat_font, state="readonly", values=font_families)
-        font_dropdown.grid(row=8, column=0, sticky="ew", padx=20)
+        font_dropdown.grid(row=6, column=0, sticky="ew", padx=20)
         self.chat_font.trace_add("write", on_font_change)
 
         # Chat font size settings
-        ttk.Label(settings_win, text="Chat Font Size:").grid(row=9, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Chat Font Size:").grid(row=7, column=0, sticky="w", pady=5, padx=20)
 
         def on_font_size_change(*args):
             save_setting("chat_font_size", self.chat_font_size.get())
             self.apply_font()
 
         font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
-        font_size_spinbox.grid(row=10, column=0, sticky="ew", padx=20)
+        font_size_spinbox.grid(row=8, column=0, sticky="ew", padx=20)
         self.chat_font_size.trace_add("write", on_font_size_change)
 
         # UI font settings
-        ttk.Label(settings_win, text="UI Font:").grid(row=11, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="UI Font:").grid(row=9, column=0, sticky="w", pady=5, padx=20)
 
         def on_ui_font_change(*args):
             save_setting("ui_font", self.ui_font.get())
             self.apply_ui_font()
 
         ui_font_dropdown = ttk.Combobox(settings_win, textvariable=self.ui_font, state="readonly", values=font_families)
-        ui_font_dropdown.grid(row=12, column=0, sticky="ew", padx=20)
+        ui_font_dropdown.grid(row=10, column=0, sticky="ew", padx=20)
         self.ui_font.trace_add("write", on_ui_font_change)
 
         # UI font size settings
-        ttk.Label(settings_win, text="UI Font Size:").grid(row=13, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="UI Font Size:").grid(row=11, column=0, sticky="w", pady=5, padx=20)
 
         def on_ui_font_size_change(*args):
             save_setting("ui_font_size", self.ui_font_size.get())
             self.apply_ui_font()
 
         ui_font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
-        ui_font_size_spinbox.grid(row=14, column=0, sticky="ew", padx=20)
+        ui_font_size_spinbox.grid(row=12, column=0, sticky="ew", padx=20)
         self.ui_font_size.trace_add("write", on_ui_font_size_change)
 
-        ttk.Label(settings_win, text="Selection Background:").grid(row=15, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Selection Background:").grid(row=13, column=0, sticky="w", pady=5, padx=20)
 
         def choose_sel_bg():
             color = colorchooser.askcolor(initialcolor=self.selection_bg.get())[1]
@@ -1427,11 +1420,11 @@ class ChatApp(tk.Tk):
                 self.selection_bg.set(color)
 
         bg_frame = ttk.Frame(settings_win)
-        bg_frame.grid(row=16, column=0, sticky="ew", padx=20)
+        bg_frame.grid(row=14, column=0, sticky="ew", padx=20)
         ttk.Entry(bg_frame, textvariable=self.selection_bg).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(settings_win, text="Selection Foreground:").grid(row=17, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Selection Foreground:").grid(row=15, column=0, sticky="w", pady=5, padx=20)
 
         def choose_sel_fg():
             color = colorchooser.askcolor(initialcolor=self.selection_fg.get())[1]
@@ -1439,7 +1432,7 @@ class ChatApp(tk.Tk):
                 self.selection_fg.set(color)
 
         fg_frame = ttk.Frame(settings_win)
-        fg_frame.grid(row=18, column=0, sticky="ew", padx=20)
+        fg_frame.grid(row=16, column=0, sticky="ew", padx=20)
         ttk.Entry(fg_frame, textvariable=self.selection_fg).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).pack(side=tk.LEFT, padx=5)
 
@@ -1452,12 +1445,12 @@ class ChatApp(tk.Tk):
         self.selection_fg.trace_add("write", on_selection_color_change)
 
         # Enable RAG setting
-        ttk.Label(settings_win, text="Enable RAG (requires restart):").grid(row=19, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Enable RAG (requires restart):").grid(row=17, column=0, sticky="w", pady=5, padx=20)
         rag_var = tk.BooleanVar(value=self.rag_enabled)
         def on_rag_toggle():
             save_setting("enable_rag", rag_var.get())
             messagebox.showinfo("Restart Required", "Please restart the application for the RAG setting to take effect.", parent=settings_win)
-        ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=20, column=0, sticky="w", padx=20)
+        ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=18, column=0, sticky="w", padx=20)
 
     def export_chat(self):
         if not self.session_id:
@@ -2356,8 +2349,18 @@ def main():
     parser = argparse.ArgumentParser(description="SlipstreamAI Chat Client")
     parser.add_argument('--db', type=str, help='Path to the chat database file.')
     args = parser.parse_args()
-    if args.db: DB_PATH = args.db
+    if args.db:
+        DB_PATH = args.db
     RECENT_DBS = load_recent_dbs()
+    if not args.db and RECENT_DBS:
+        DB_PATH = RECENT_DBS[0]
+
+    if DB_PATH in RECENT_DBS:
+        RECENT_DBS.remove(DB_PATH)
+    RECENT_DBS.insert(0, DB_PATH)
+    RECENT_DBS = RECENT_DBS[:5]
+    save_recent_dbs(RECENT_DBS)
+
     # Initialize database first so settings are available
     init_db()
     # Now initialize RAG based on settings
