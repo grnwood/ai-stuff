@@ -85,7 +85,7 @@ def fetch_url_text(url: str) -> str:
 load_dotenv()
 
 APP_NAME="SlipStreamAI"
-API_URL = os.getenv("OPENAI_PROXY_URL", "http://localhost:3000")
+API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
 RAG_IDLE_MINUTES = int(os.getenv("RAG_IDLE_MINUTES", "5"))
