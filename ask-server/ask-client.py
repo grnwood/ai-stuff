@@ -1511,8 +1511,12 @@ class ChatApp(tk.Tk):
                 else:
                     raise ValueError("Invalid JSON format. Expected a list of messages or a dictionary with 'model' and 'messages'.")
 
-                new_session_name = tk.simpledialog.askstring("Import Chat", "Enter a name for the new session:",
-                                                              initialvalue=f"Imported Chat {len(get_sessions()) + 1}")
+                default_name = os.path.splitext(os.path.basename(file_path))[0]
+                new_session_name = tk.simpledialog.askstring(
+                    "Import Chat",
+                    "Enter a name for the new session:",
+                    initialvalue=default_name
+                )
                 if not new_session_name:
                     return
 
@@ -2219,9 +2223,8 @@ class ChatApp(tk.Tk):
         # After the response, reload the history to show the assistant's message
         self.load_chat_history()
         
-        # Auto-summarize session name after a few messages
-        if len(messages) % 5 == 0 and len(messages) > 0:
-            self.summarize_and_rename_session()
+        # Auto-summarize session name after each interaction
+        self.summarize_and_rename_session()
 
         self.schedule_rag_unload()
 
