@@ -1758,7 +1758,7 @@ class ChatApp(tk.Tk):
         if type == 'folder':
             self.session_id = None
             self.session_name = None
-            self.title("SlipstreamAI Client")
+            self.title(f"{APP_NAME} Client")
             self.chat_history.configure(state="normal")
             self.chat_history.delete("1.0", tk.END)
             self.chat_history.configure(state="normal")
