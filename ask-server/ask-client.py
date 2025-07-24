@@ -14,6 +14,7 @@ from tkinter import PhotoImage
 from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
+from rag_manager import RAGManager
 from bs4 import BeautifulSoup
 import platform
 import shlex
@@ -579,6 +580,9 @@ class ChatApp(tk.Tk):
             self.icon_img = PhotoImage(file=icon_path)
             self.iconphoto(True, self.icon_img)  # ← this sets the window icon
         
+        # Manager for optional RAG support using ChromaDB
+        self.rag_manager = RAGManager()
+
         init_db()
         self.session_id = None
         self.session_name = None
@@ -617,6 +621,20 @@ class ChatApp(tk.Tk):
         self.drag_item = None
         self.current_input_buffer = ""
 
+        # Ensure the process exits cleanly when the window is closed
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def load_rag(self, path):
+        """Load a ChromaDB RAG database from ``path``."""
+        try:
+            self.rag_manager.load(path)
+        except Exception as exc:
+            print(f"Failed to load RAG database: {exc}")
+
+    def unload_rag(self):
+        """Close any active RAG database."""
+        self.rag_manager.close()
+
     def restart_app_with_db(self, db_path):
         """Restart the entire application with a new database path, safely across platforms."""
         global DB_PATH, RECENT_DBS
@@ -629,26 +647,25 @@ class ChatApp(tk.Tk):
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
+        # Close any active RAG database before restarting
+        if hasattr(self, "rag_manager"):
+            self.rag_manager.close()
+        # Destroy the current window before replacing the process
+        self.after(100, lambda: self._exec_new_process(db_path))
 
-        def restart():
-            python_exe = sys.executable
+    def _exec_new_process(self, db_path):
+        """Helper to exec the same script with a new database."""
+        self.destroy()
+        os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path)
 
-            if getattr(sys, 'frozen', False):
-                script_path = sys.executable  # For PyInstaller builds
-            else:
-                script_path = os.path.abspath(__file__)
+    def on_close(self):
+        """Handle window close event and exit the process."""
+        # Ensure any RAG-related resources are released
+        if hasattr(self, "rag_manager"):
+            self.rag_manager.close()
+        self.destroy()
+        sys.exit(0)
 
-            # Quote the db_path to ensure spaces are handled correctly
-            quoted_db_path = shlex.quote(db_path) if os.name != 'nt' else f'"{db_path}"'
-
-            args = [python_exe, script_path, '--db', quoted_db_path]
-
-            print("Restarting with:", args)
-            self.destroy()
-            os.execl(python_exe, *args)
-
-        self.after(100, restart)
-    
     def on_model_selected(self, event):
         if self.session_id:
             selected_model = self.model_var.get()
