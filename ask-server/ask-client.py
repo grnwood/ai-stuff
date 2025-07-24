@@ -17,7 +17,6 @@ from PIL import Image
 from rag.rag_manager import RAGManager
 from bs4 import BeautifulSoup
 import platform
-import shlex
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "True").lower() == "true"
@@ -639,8 +638,12 @@ class ChatApp(tk.Tk):
     def restart_app_with_db(self, db_path):
         """Restart the entire application with a new database path, safely across platforms."""
         global DB_PATH, RECENT_DBS
+
         if not db_path:
             return
+
+        # Normalize the DB path
+        db_path = os.path.abspath(db_path)
 
         DB_PATH = db_path
         if db_path in RECENT_DBS:
@@ -648,16 +651,30 @@ class ChatApp(tk.Tk):
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
+
         # Close any active RAG database before restarting
         if hasattr(self, "rag_manager"):
             self.rag_manager.close()
-        # Destroy the current window before replacing the process
+
+        # Schedule restart after UI finishes processing
         self.after(100, lambda: self._exec_new_process(db_path))
 
     def _exec_new_process(self, db_path):
-        """Helper to exec the same script with a new database."""
-        self.destroy()
-        os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path)
+        """Internal helper to restart the app with the given DB path."""
+        python_exe = sys.executable
+        script_path = os.path.abspath(__file__)
+        
+        if platform.system() == "Windows":
+            # No shlex.quote on Windows — just wrap in double quotes if needed
+            if " " in db_path:
+                db_path = f'"{db_path}"'
+            args = [python_exe, script_path, "--db", db_path]
+        else:
+            # Quote path safely for Unix
+            args = [python_exe, script_path, "--db", db_path]
+
+        print("Restarting with:", args)
+        os.execl(python_exe, *args)
 
     def on_close(self):
         """Handle window close event and exit the process."""
