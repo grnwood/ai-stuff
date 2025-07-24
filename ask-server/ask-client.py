@@ -12,6 +12,7 @@ from html.parser import HTMLParser
 from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
+from rag_manager import RAGManager
 
 load_dotenv()
 
@@ -461,6 +462,9 @@ class ChatApp(tk.Tk):
         self.title("SlipstreamAI")
         self.geometry("1000x600")
 
+        # Manager for optional RAG support using ChromaDB
+        self.rag_manager = RAGManager()
+
         init_db()
         self.session_id = None
         self.session_name = None
@@ -498,6 +502,17 @@ class ChatApp(tk.Tk):
         # Ensure the process exits cleanly when the window is closed
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def load_rag(self, path):
+        """Load a ChromaDB RAG database from ``path``."""
+        try:
+            self.rag_manager.load(path)
+        except Exception as exc:
+            print(f"Failed to load RAG database: {exc}")
+
+    def unload_rag(self):
+        """Close any active RAG database."""
+        self.rag_manager.close()
+
     def restart_app_with_db(self, db_path):
         """Restart the entire application with a new database path."""
         global DB_PATH, RECENT_DBS
@@ -509,6 +524,9 @@ class ChatApp(tk.Tk):
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
+        # Close any active RAG database before restarting
+        if hasattr(self, "rag_manager"):
+            self.rag_manager.close()
         # Destroy the current window before replacing the process
         self.after(100, lambda: self._exec_new_process(db_path))
 
@@ -519,6 +537,9 @@ class ChatApp(tk.Tk):
 
     def on_close(self):
         """Handle window close event and exit the process."""
+        # Ensure any RAG-related resources are released
+        if hasattr(self, "rag_manager"):
+            self.rag_manager.close()
         self.destroy()
         sys.exit(0)
 

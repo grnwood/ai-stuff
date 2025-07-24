@@ -101,3 +101,11 @@
      arrow keys, just like in a terminal.
    * ⌨️ F2 Hotkey: Press F2 on a selected session to quickly rename it.
    * 🖋️ UI Font Customization: Choose both the font family and size for all interface elements.
+
+## RAG Support
+
+SlipstreamAI optionally integrates with [ChromaDB](https://docs.trychroma.com/) for
+retrieval‑augmented generation (RAG). When a RAG database is loaded, the
+application now ensures that the underlying Chroma client is shut down whenever
+you close the program or switch databases. This prevents lingering background
+processes from consuming memory.
