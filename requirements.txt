@@ -4,3 +4,4 @@ markdown
 pillow
 openai
 selenium
+chromadb
