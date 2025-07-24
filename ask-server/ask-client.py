@@ -98,6 +98,10 @@ DB_PATH = "chat_sessions.db"
 RECENT_DB_FILE = "recent_dbs.json"
 RECENT_DBS = []
 
+# File used to persist window geometry per database
+WINDOW_GEOMETRY_FILE = "window_geometries.json"
+WINDOW_GEOMETRIES = {}
+
 def load_recent_dbs():
     """Load the list of recently used database files."""
     if os.path.exists(RECENT_DB_FILE):
@@ -115,6 +119,26 @@ def save_recent_dbs(paths):
     try:
         with open(RECENT_DB_FILE, "w") as f:
             json.dump(paths, f)
+    except Exception:
+        pass
+
+def load_window_geometries():
+    """Load saved window geometries keyed by database path."""
+    if os.path.exists(WINDOW_GEOMETRY_FILE):
+        try:
+            with open(WINDOW_GEOMETRY_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+def save_window_geometries(data):
+    """Persist window geometries mapping."""
+    try:
+        with open(WINDOW_GEOMETRY_FILE, "w") as f:
+            json.dump(data, f)
     except Exception:
         pass
 
@@ -145,10 +169,15 @@ def init_db():
                     name TEXT NOT NULL,
                     model TEXT DEFAULT 'gpt-3.5-turbo',
                     system_prompt TEXT,
+                    system_prompt_id INTEGER,
                     parent_id INTEGER,
                     type TEXT DEFAULT 'chat',
                     FOREIGN KEY(parent_id) REFERENCES sessions(id)
                 )''')
+    c.execute("PRAGMA table_info(sessions)")
+    cols = [row[1] for row in c.fetchall()]
+    if 'system_prompt_id' not in cols:
+        c.execute('ALTER TABLE sessions ADD COLUMN system_prompt_id INTEGER')
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     session_id INTEGER,
                     role TEXT,
@@ -210,15 +239,18 @@ def save_setting(key, value):
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, model, system_prompt, parent_id, type FROM sessions ORDER BY id")
+    c.execute("SELECT id, name, model, system_prompt, system_prompt_id, parent_id, type FROM sessions ORDER BY id")
     sessions = c.fetchall()
     conn.close()
     return sessions
 
-def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None):
+def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None, system_prompt_id=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT INTO sessions (name, model, system_prompt, type, parent_id) VALUES (?, ?, ?, ?, ?)", (name, model, system_prompt, type, parent_id))
+    c.execute(
+        "INSERT INTO sessions (name, model, system_prompt, system_prompt_id, type, parent_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, model, system_prompt, system_prompt_id, type, parent_id),
+    )
     conn.commit()
     session_id = c.lastrowid
     conn.close()
@@ -237,6 +269,13 @@ def update_session_system_prompt(session_id, system_prompt):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE sessions SET system_prompt = ? WHERE id = ?", (system_prompt, session_id))
+    conn.commit()
+    conn.close()
+
+def update_session_system_prompt_id(session_id, prompt_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET system_prompt_id = ? WHERE id = ?", (prompt_id, session_id))
     conn.commit()
     conn.close()
 
@@ -599,6 +638,7 @@ class ChatApp(tk.Tk):
         self.ui_font_size = tk.IntVar(value=get_setting("ui_font_size", 12))
         self.selection_bg = tk.StringVar(value=get_setting("selection_bg", "#b2d7ff"))
         self.selection_fg = tk.StringVar(value=get_setting("selection_fg", "black"))
+        self.current_system_prompt_id = None
 
         self.chat_icon = tk.PhotoImage(file=os.path.join("ask-server/assets", "comment-alt.png"))
         self.folder_icon = tk.PhotoImage(file=os.path.join("ask-server/assets", "folder-open.png"))
@@ -637,7 +677,7 @@ class ChatApp(tk.Tk):
 
     def restart_app_with_db(self, db_path):
         """Restart the entire application with a new database path, safely across platforms."""
-        global DB_PATH, RECENT_DBS
+        global DB_PATH, RECENT_DBS, WINDOW_GEOMETRIES
 
         if not db_path:
             return
@@ -645,12 +685,16 @@ class ChatApp(tk.Tk):
         # Normalize the DB path
         db_path = os.path.abspath(db_path)
 
+        old_path = DB_PATH
         DB_PATH = db_path
         if db_path in RECENT_DBS:
             RECENT_DBS.remove(db_path)
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
+
+        WINDOW_GEOMETRIES[old_path] = self.geometry()
+        save_window_geometries(WINDOW_GEOMETRIES)
 
         # Close any active RAG database before restarting
         if hasattr(self, "rag_manager"):
@@ -678,9 +722,12 @@ class ChatApp(tk.Tk):
 
     def on_close(self):
         """Handle window close event and exit the process."""
+        global WINDOW_GEOMETRIES
         # Ensure any RAG-related resources are released
         if hasattr(self, "rag_manager"):
             self.rag_manager.close()
+        WINDOW_GEOMETRIES[DB_PATH] = self.geometry()
+        save_window_geometries(WINDOW_GEOMETRIES)
         self.destroy()
         sys.exit(0)
 
@@ -1174,6 +1221,12 @@ class ChatApp(tk.Tk):
         self.delete_prompt_button = ttk.Button(self.right_frame, text="Delete", command=self.delete_current_system_prompt)
         self.delete_prompt_button.grid(row=5, column=1, sticky="ew", padx=5, pady=5)
 
+        self.export_prompts_button = ttk.Button(self.right_frame, text="Export", command=self.export_system_prompts)
+        self.export_prompts_button.grid(row=6, column=0, sticky="ew", padx=5, pady=5)
+
+        self.import_prompts_button = ttk.Button(self.right_frame, text="Import", command=self.import_system_prompts)
+        self.import_prompts_button.grid(row=6, column=1, sticky="ew", padx=5, pady=5)
+
         # --- Toggle Button for Right Panel ---
         style = ttk.Style()
         style.configure("Small.TButton", padding=1, font=('TkDefaultFont', 7))
@@ -1195,6 +1248,9 @@ class ChatApp(tk.Tk):
             self.system_prompt_title_entry.delete(0, tk.END)
             self.system_prompt_text.delete("1.0", tk.END)
             self.save_prompt_button.config(state="disabled")
+            self.current_system_prompt_id = None
+            if self.session_id:
+                update_session_system_prompt_id(self.session_id, None)
             return
 
         for p_id, title, prompt in self.system_prompts:
@@ -1206,6 +1262,9 @@ class ChatApp(tk.Tk):
                 self.system_prompt_text.insert("1.0", prompt)
                 self.save_prompt_button.config(state="disabled")
                 self.system_prompt_text.edit_modified(False)
+                if self.session_id:
+                    update_session_system_prompt(self.session_id, prompt)
+                    update_session_system_prompt_id(self.session_id, p_id)
                 break
 
     def on_prompt_modified(self, event=None):
@@ -1496,10 +1555,10 @@ class ChatApp(tk.Tk):
         
         # Get the current session's details
         current_session_info = None
-        for _id, name, model, system_prompt, parent_id, type in get_sessions():
+        for _id, name, model, system_prompt, sp_id, parent_id, type in get_sessions():
             if _id == self.session_id:
                 current_session_info = {
-                    "model": model, 
+                    "model": model,
                     "messages": messages,
                     "system_prompt": system_prompt
                 }
@@ -1590,6 +1649,67 @@ class ChatApp(tk.Tk):
             except Exception as e:
                 messagebox.showerror("Import Error", f"An unexpected error occurred: {e}")
 
+    def export_system_prompts(self):
+        prompts = get_system_prompts()
+        if not prompts:
+            messagebox.showinfo("Export System Prompts", "No system prompts to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")],
+            initialfile="system_prompts.json",
+        )
+
+        if file_path:
+            try:
+                data = [{"title": title, "prompt": prompt} for _, title, prompt in prompts]
+                with open(file_path, "w") as f:
+                    json.dump(data, f, indent=4)
+                messagebox.showinfo("Export System Prompts", "System prompts exported successfully!")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export system prompts: {e}")
+
+    def import_system_prompts(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict) and "prompts" in data:
+                prompts = data["prompts"]
+            else:
+                prompts = data
+
+            if not isinstance(prompts, list):
+                raise ValueError("Invalid JSON format for system prompts")
+
+            count = 0
+            for item in prompts:
+                if isinstance(item, dict):
+                    title = item.get("title")
+                    prompt = item.get("prompt")
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    title, prompt = item[0], item[1]
+                else:
+                    continue
+                if title and prompt:
+                    save_system_prompt(title, prompt)
+                    count += 1
+
+            self.load_system_prompts_to_dropdown()
+            messagebox.showinfo("Import System Prompts", f"Imported {count} prompts!")
+        except json.JSONDecodeError:
+            messagebox.showerror("Import Error", "Invalid JSON file.")
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import system prompts: {e}")
+
     def new_folder(self, parent_id=None):
         name = tk.simpledialog.askstring("New Folder", "Enter folder name:")
         if name:
@@ -1609,9 +1729,9 @@ class ChatApp(tk.Tk):
         
         sessions = get_sessions()
         session_map = {s[0]: s for s in sessions}
-        
+
         def add_to_tree(parent_id, parent_node=""):
-            for _id, name, model, system_prompt, s_parent_id, type in sessions:
+            for _id, name, model, system_prompt, sp_id, s_parent_id, type in sessions:
                 if s_parent_id == parent_id:
                     icon = self.chat_icon if type == 'chat' else self.folder_icon
                     node = self.session_tree.insert(parent_node, "end", text=name, values=(str(_id), type), image=icon)
@@ -1645,7 +1765,7 @@ class ChatApp(tk.Tk):
             self.update_input_widgets_state()
             return
 
-        for sid, name, model, system_prompt, parent_id, stype in get_sessions():
+        for sid, name, model, system_prompt, sp_id, parent_id, stype in get_sessions():
             if sid == _id:
                 self.session_name = name
                 self.session_id = _id
@@ -1656,6 +1776,12 @@ class ChatApp(tk.Tk):
                 self.system_prompt_text.delete("1.0", tk.END)
                 if system_prompt:
                     self.system_prompt_text.insert("1.0", system_prompt)
+                self.current_system_prompt_id = sp_id
+                self.system_prompt_var.set("New...")
+                for pid, title, _ in self.system_prompts:
+                    if pid == sp_id:
+                        self.system_prompt_var.set(title)
+                        break
 
                 if rag_functions:
                     self.chat_files = rag_functions['get_files_for_chat'](self.session_id)
@@ -1673,7 +1799,7 @@ class ChatApp(tk.Tk):
             return
 
     def get_session_id_by_name(self, name):
-        for _id, s_name, model, system_prompt, parent_id, type in get_sessions():
+        for _id, s_name, model, system_prompt, sp_id, parent_id, type in get_sessions():
             if s_name == name:
                 return _id
         return None
@@ -1718,7 +1844,12 @@ class ChatApp(tk.Tk):
                     parent_id = self.session_tree.item(selected_item, "values")[0]
 
         db_parent_id = int(parent_id) if parent_id is not None else None
-        session_id = create_session(name, default_model, parent_id=db_parent_id)
+        session_id = create_session(
+            name,
+            default_model,
+            parent_id=db_parent_id,
+            system_prompt_id=getattr(self, "current_system_prompt_id", None)
+        )
         
         parent_node = self.find_tree_item_by_id(parent_id) if parent_id is not None else ""
         if parent_node is None:
@@ -1855,6 +1986,8 @@ class ChatApp(tk.Tk):
         system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
         if system_prompt:
             message_blocks.insert(0, {"role": "system", "content": system_prompt})
+        update_session_system_prompt(self.session_id, system_prompt)
+        update_session_system_prompt_id(self.session_id, getattr(self, "current_system_prompt_id", None))
 
         # RAG workflow: If chat has associated files, retrieve context from ChromaDB
         context_block = None
@@ -1922,7 +2055,12 @@ class ChatApp(tk.Tk):
                 new_session_name = "New Discussion"
 
             # Create a new session with the generated title
-            new_session_id = create_session(new_session_name, self.model_var.get(), self.system_prompt_text.get("1.0", tk.END).strip())
+            new_session_id = create_session(
+                new_session_name,
+                self.model_var.get(),
+                self.system_prompt_text.get("1.0", tk.END).strip(),
+                system_prompt_id=getattr(self, "current_system_prompt_id", None)
+            )
             save_message(new_session_id, "user", f"Let's discuss the following:\n\n{selected_text}")
             self.load_sessions()
             
@@ -2384,7 +2522,7 @@ class ChatApp(tk.Tk):
             self.chat_history.see(start_pos)
 
 def main():
-    global DB_PATH, RECENT_DBS
+    global DB_PATH, RECENT_DBS, WINDOW_GEOMETRIES
     parser = argparse.ArgumentParser(description="SlipstreamAI Chat Client")
     parser.add_argument('--db', type=str, help='Path to the chat database file.')
     args = parser.parse_args()
@@ -2400,11 +2538,15 @@ def main():
     RECENT_DBS = RECENT_DBS[:5]
     save_recent_dbs(RECENT_DBS)
     print(f"Using database: {DB_PATH}")
+    WINDOW_GEOMETRIES = load_window_geometries()
     # Initialize database first so settings are available
     init_db()
     # Now initialize RAG based on settings
     initialize_rag()
     app = ChatApp()
+    geom = WINDOW_GEOMETRIES.get(DB_PATH)
+    if geom:
+        app.geometry(geom)
     app.mainloop()
 
 if __name__ == "__main__":
