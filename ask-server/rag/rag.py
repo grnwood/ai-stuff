@@ -4,57 +4,21 @@ import requests
 from ocr.tesseract import is_tesseract
 from ocr.tesseract import extract_text_from_pdf
 import os
-import chromadb
-from dotenv import load_dotenv
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
-from sentence_transformers import SentenceTransformer
+from rag_manager import RAGManager
 import multiprocessing
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-class LocalEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, model):
-        self.model = model
-
-    def __call__(self, input: Documents) -> Embeddings:
-        return self.model.encode(input).tolist()
-
 class RAGProcessor:
     def __init__(self):
         print("[RAG] Initializing RAGProcessor...")
-        self.load_model_and_db()
-
-    def load_model_and_db(self):
-        # Get Env
-        print("[RAG] Loading environment variables...")
-        load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-        
-        # Load local embedding model
-        base_path = os.path.join(
-            PROJECT_ROOT,
-            "rag", "models",
-            "models--sentence-transformers--all-MiniLM-L6-v2",
-            "snapshots"
-        )
-        snapshot_ids = os.listdir(base_path)
-        if not snapshot_ids:
-            raise FileNotFoundError(f"No snapshot folders found in {base_path}")
-        snapshot_id = snapshot_ids[0]
-        model_path = os.path.join(base_path, snapshot_id)
-        
-        print(f"[RAG] Loading local embedding model (sentence-transformers/all-MiniLM-L6-v2)...{snapshot_id}")
-        self.local_embedder = SentenceTransformer(model_path)
-        
-        embedding_function = LocalEmbeddingFunction(self.local_embedder)
-
-        # Initialize ChromaDB client
-        print("[RAG] Initializing ChromaDB persistent client and collection...")
-        self.chroma_client = chromadb.PersistentClient(path="./chroma_store")
-        self.collection = self.chroma_client.get_or_create_collection(
-            "rag_files",
-            embedding_function=embedding_function
-        )
+        self.rag_manager = RAGManager()
+        self.rag_manager.load("./chroma_store")
         print("[RAG] RAGProcessor initialized successfully.")
+
+    @property
+    def collection(self):
+        return self.rag_manager.collection
 
 _rag_processor_instance = None
 
@@ -138,15 +102,12 @@ def unload_rag_processor():
     global _rag_processor_instance
     if _rag_processor_instance is not None:
         try:
-            _rag_processor_instance.chroma_client = None
-            _rag_processor_instance.collection = None
-            _rag_processor_instance.local_embedder = None
-        except Exception:
-            pass
-        _rag_processor_instance = None
-        import gc
-        gc.collect()
-        print(f"[RAG] RAGProcessor unloaded to free memory")
+            _rag_processor_instance.rag_manager.close()
+        finally:
+            _rag_processor_instance = None
+            import gc
+            gc.collect()
+            print(f"[RAG] RAGProcessor unloaded to free memory")
 
 def extract_text(filepath):
     if filepath.lower().endswith(".pdf"):
