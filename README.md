@@ -105,9 +105,10 @@ SlipstreamAI: Your Personal Gateway to OpenAI
 
 SlipstreamAI optionally integrates with [ChromaDB](https://docs.trychroma.com/) for
 retrieval‑augmented generation (RAG). When a RAG database is loaded, the
-application now ensures that the underlying Chroma client is shut down whenever
-you close the program or switch databases. This prevents lingering background
-processes from consuming memory.
+application now ensures that the underlying Chroma client and the local
+embedding model are shut down whenever you close the program or switch
+databases. This prevents lingering background processes from consuming memory
+and fully frees RAM used by sentence-transformers.
 
 ---
 
