@@ -14,7 +14,7 @@ from tkinter import PhotoImage
 from dotenv import load_dotenv
 from tkinter import font
 from PIL import Image
-from rag_manager import RAGManager
+from rag.rag_manager import RAGManager
 from bs4 import BeautifulSoup
 import platform
 import shlex
@@ -121,6 +121,7 @@ def save_recent_dbs(paths):
 
 def get_available_models():
     try:
+        print(f"Fetching available models from {API_URL}/mods, PROXY_VERIFY_CERT={PROXY_VERIFY_CERT}")
         response = requests.get(f"{API_URL}/mods", headers={"x-api-secret": API_SECRET},verify=PROXY_VERIFY_CERT)
         response.raise_for_status()
         models = response.json()
