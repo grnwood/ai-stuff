@@ -2395,7 +2395,7 @@ def main():
     RECENT_DBS.insert(0, DB_PATH)
     RECENT_DBS = RECENT_DBS[:5]
     save_recent_dbs(RECENT_DBS)
-
+    print(f"Using database: {DB_PATH}")
     # Initialize database first so settings are available
     init_db()
     # Now initialize RAG based on settings
