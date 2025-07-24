@@ -6,6 +6,7 @@ import os
 import json
 import sqlite3
 import argparse
+import sys
 from markdown import markdown
 from html.parser import HTMLParser
 from dotenv import load_dotenv
@@ -494,6 +495,9 @@ class ChatApp(tk.Tk):
         self.drag_item = None
         self.current_input_buffer = ""
 
+        # Ensure the process exits cleanly when the window is closed
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
     def restart_app_with_db(self, db_path):
         """Restart the entire application with a new database path."""
         global DB_PATH, RECENT_DBS
@@ -505,7 +509,18 @@ class ChatApp(tk.Tk):
         RECENT_DBS.insert(0, db_path)
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
-        self.after(100, lambda: os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path))
+        # Destroy the current window before replacing the process
+        self.after(100, lambda: self._exec_new_process(db_path))
+
+    def _exec_new_process(self, db_path):
+        """Helper to exec the same script with a new database."""
+        self.destroy()
+        os.execl(sys.executable, sys.executable, os.path.abspath(__file__), '--db', db_path)
+
+    def on_close(self):
+        """Handle window close event and exit the process."""
+        self.destroy()
+        sys.exit(0)
 
     def on_model_selected(self, event):
         if self.session_id:
