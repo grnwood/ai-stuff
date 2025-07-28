@@ -15,9 +15,13 @@ class RAGManager:
 
         # Ensure the path is absolute and short enough for ChromaDB's internal
         # Unix socket creation. Long paths can exceed the typical 108 character
-        # limit, resulting in ``File name too long`` errors on startup.
+        # limit for Unix domain sockets, which are used by the embedded Rust
+        # server.  We add a safety margin of around 50 characters for the
+        # additional components Chromadb appends to the supplied directory.
         persist_directory = os.path.abspath(persist_directory)
-        if len(persist_directory) > 90:
+        if len(persist_directory) > 58:
+            # Fall back to a short directory under /tmp when the path is too
+            # long.  This prevents ``File name too long`` errors on startup.
             persist_directory = "/tmp/chroma_store"
 
         self.client = chromadb.PersistentClient(
