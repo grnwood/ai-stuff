@@ -88,7 +88,6 @@ APP_NAME="SlipStreamAI"
 API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
 API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
-RAG_IDLE_MINUTES = int(os.getenv("RAG_IDLE_MINUTES", "5"))
 
 # Default database path. This may be overridden via --db on the command line
 # and can be changed at runtime from the settings window.
@@ -629,7 +628,6 @@ class ChatApp(tk.Tk):
         self.history_index = -1
         self.chat_files = []
         self.rag_enabled = get_setting("enable_rag", "True") == "True"
-        self.rag_unload_after_id = None
         
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
@@ -1753,7 +1751,6 @@ class ChatApp(tk.Tk):
         _id, type = self.session_tree.item(selected_item, "values")
         _id = int(_id)
 
-        self.schedule_rag_unload()
         
         if type == 'folder':
             self.session_id = None
@@ -1762,6 +1759,8 @@ class ChatApp(tk.Tk):
             self.chat_history.configure(state="normal")
             self.chat_history.delete("1.0", tk.END)
             self.chat_history.configure(state="normal")
+            self.chat_files = []
+            self.update_files_listbox()
             self.update_input_widgets_state()
             return
 
@@ -1787,6 +1786,7 @@ class ChatApp(tk.Tk):
                     self.chat_files = rag_functions['get_files_for_chat'](self.session_id)
                 else:
                     self.chat_files = []
+                self.update_files_listbox()
                 self.load_chat_history()
                 self.message_history = get_input_history(self.session_id)
                 self.history_index = len(self.message_history)
@@ -1863,26 +1863,6 @@ class ChatApp(tk.Tk):
         self.status_bar.config(text=message)
         self.after(duration, lambda: self.status_bar.config(text=""))
 
-    def schedule_rag_unload(self):
-        if not rag_functions or not rag_functions.get('is_rag_loaded'):
-            return
-        if self.rag_unload_after_id:
-            self.after_cancel(self.rag_unload_after_id)
-        timeout_ms = RAG_IDLE_MINUTES * 60 * 1000
-        self.rag_unload_after_id = self.after(timeout_ms, self.unload_rag)
-
-    def unload_rag(self):
-        if not rag_functions or not rag_functions.get('is_rag_loaded'):
-            return
-        try:
-            rag_functions['unload_rag_processor']()
-            print("RAG unloaded to free memory...")
-            self.show_status_message("RAG unloaded to free memory...")
-            if self.session_id:
-                save_message(self.session_id, "assistant", "RAG unloaded to free memory...")
-                self.load_chat_history()
-        finally:
-            self.rag_unload_after_id = None
 
     def copy_message_from_link(self, event):
         try:
@@ -2011,10 +1991,8 @@ class ChatApp(tk.Tk):
                             break
             except Exception as e:
                 self.show_status_message(f"RAG context retrieval failed: {e}")
-            self.schedule_rag_unload()
 
         self.load_chat_history()
-        self.schedule_rag_unload()
         self.update_idletasks()
 
         try:
@@ -2023,8 +2001,6 @@ class ChatApp(tk.Tk):
             messagebox.showerror("API Error", str(e))
 
         self.load_chat_history()
-
-        self.schedule_rag_unload()
 
         item_to_select = self.find_tree_item_by_id(active_session_id)
         if item_to_select:
@@ -2310,7 +2286,6 @@ class ChatApp(tk.Tk):
                 return
             rag_functions['add_file_to_chat'](file_path, chat_id=self.session_id)
             self.show_status_message(f"File embedded and associated with chat {self.session_id}.")
-            self.schedule_rag_unload()
         except Exception as e:
             self.show_status_message(f"Failed to embed file: {e}")
 
@@ -2353,7 +2328,6 @@ class ChatApp(tk.Tk):
                 save_message(self.session_id, "assistant", f"Error retrieving {content}: {e}")
                 raise e
             self.load_chat_history()
-            self.schedule_rag_unload()
             return "break"
         
         messages = get_messages(self.session_id)
@@ -2382,7 +2356,6 @@ class ChatApp(tk.Tk):
                             break
             except Exception as e:
                 self.show_status_message(f"RAG context retrieval failed: {e}")
-            self.schedule_rag_unload()
 
         self.load_chat_history()
         
@@ -2399,8 +2372,6 @@ class ChatApp(tk.Tk):
         
         # Auto-summarize session name
         self.summarize_and_rename_session()
-
-        self.schedule_rag_unload()
 
         return "break"
 
