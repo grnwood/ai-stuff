@@ -13,7 +13,8 @@ class RAGProcessor:
     def __init__(self):
         print("[RAG] Initializing RAGProcessor...")
         self.rag_manager = RAGManager()
-        self.rag_manager.load("./chroma_store")
+        persist_dir = os.path.join(PROJECT_ROOT, "chroma_store")
+        self.rag_manager.load(persist_dir)
         print("[RAG] RAGProcessor initialized successfully.")
 
     @property
