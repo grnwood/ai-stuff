@@ -24,9 +24,8 @@ class RAGManager:
             # long.  This prevents ``File name too long`` errors on startup.
             persist_directory = "/tmp/chroma_store"
 
-        self.client = chromadb.PersistentClient(
-            Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_directory)
-        )
+        self.client = chromadb.PersistentClient(path=persist_directory)
+        
         self.collection = self.client.get_or_create_collection("rag")
         return self.collection
 

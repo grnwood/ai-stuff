@@ -49,9 +49,7 @@ class RAGManager:
         self.embedder = SentenceTransformer(model_path)
         embedding_function = LocalEmbeddingFunction(self.embedder)
 
-        self.client = chromadb.PersistentClient(
-            Settings(chroma_db_impl='duckdb+parquet', persist_directory=persist_directory)
-        )
+        self.client = chromadb.PersistentClient(path=persist_directory)
         self.collection = self.client.get_or_create_collection(
             'rag_files', embedding_function=embedding_function
         )
