@@ -12,10 +12,9 @@ class RAGManager:
         """Load (or reload) the ChromaDB database from ``persist_directory``."""
         self.close()
         
-        #self.client = chromadb.PersistentClient(
-        #    Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_directory)
-        #)
-        self.client = chromadb.Client()
+        self.client = chromadb.PersistentClient(
+            Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_directory)
+        )
         self.collection = self.client.get_or_create_collection("rag")
         return self.collection
 
