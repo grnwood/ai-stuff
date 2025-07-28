@@ -1,11 +1,9 @@
 import fitz
 from docx import Document
-import requests
 from ocr.tesseract import is_tesseract
 from ocr.tesseract import extract_text_from_pdf
 import os
 from rag_manager import RAGManager
-import multiprocessing
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -23,68 +21,9 @@ class RAGProcessor:
 
 _rag_processor_instance = None
 
-# Globals for managing the background RAG subprocess
-_rag_process = None
-_rag_conn = None
-_IN_WORKER = False
-
-def _worker_loop(conn):
-    """Entry point for the background RAG process."""
-    global _IN_WORKER
-    _IN_WORKER = True
-    while True:
-        try:
-            cmd, args, kwargs = conn.recv()
-        except EOFError:
-            break
-        if cmd == "stop":
-            unload_rag_processor()
-            break
-        elif cmd == "wake":
-            wake_rag_processor()
-            conn.send(True)
-        elif cmd == "add_file_to_chat":
-            conn.send(add_file_to_chat(*args, **kwargs))
-        elif cmd == "add_text_to_chat":
-            conn.send(add_text_to_chat(*args, **kwargs))
-        elif cmd == "delete_file_from_chat":
-            conn.send(delete_file_from_chat(*args, **kwargs))
-        elif cmd == "delete_source_from_chat":
-            conn.send(delete_source_from_chat(*args, **kwargs))
-        elif cmd == "delete_all_files_from_chat":
-            conn.send(delete_all_files_from_chat(*args, **kwargs))
-        elif cmd == "query_by_chat_id":
-            conn.send(query_by_chat_id(*args, **kwargs))
-        elif cmd == "get_files_for_chat":
-            conn.send(get_files_for_chat(*args, **kwargs))
-        elif cmd == "is_rag_loaded":
-            conn.send(is_rag_loaded())
-        else:
-            conn.send(None)
-    conn.close()
-
-
-def _start_rag_process():
-    """Ensure the background process is running."""
-    global _rag_process, _rag_conn
-    if _rag_process is None or not _rag_process.is_alive():
-        parent_conn, child_conn = multiprocessing.Pipe()
-        _rag_process = multiprocessing.Process(target=_worker_loop, args=(child_conn,))
-        _rag_process.start()
-        _rag_conn = parent_conn
-
-
-def _send_cmd(cmd, *args, **kwargs):
-    _start_rag_process()
-    _rag_conn.send((cmd, args, kwargs))
-    return _rag_conn.recv()
-
 def wake_rag_processor():
-    """Wake up the RAGProcessor if it is not already loaded."""
-    if _IN_WORKER:
-        get_rag_processor()
-    else:
-        _send_cmd("wake")
+    """Ensure the RAGProcessor is loaded."""
+    get_rag_processor()
     
 def get_rag_processor():
     global _rag_processor_instance
@@ -94,9 +33,7 @@ def get_rag_processor():
 
 def is_rag_loaded():
     """Return True if the RAGProcessor is currently loaded."""
-    if _IN_WORKER:
-        return _rag_processor_instance is not None
-    return _send_cmd("is_rag_loaded")
+    return _rag_processor_instance is not None
 
 def unload_rag_processor():
     """Unload the RAGProcessor and free associated resources."""
@@ -131,58 +68,52 @@ def extract_text(filepath):
         raise ValueError("Unsupported file type. Only PDF and DOCX are supported.")
 
 def add_file_to_chat(filepath, chat_id=None):
-    if _IN_WORKER:
-        try:
-            text = extract_text(filepath)
-            if text:
-                chunk_size = 1000
-                chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                chunk_ids = [f"{chat_id}_{os.path.basename(filepath)}_chunk_{i}" for i in range(len(chunk_texts))]
-                metadatas = [{"chat_id": chat_id, "source": filepath, "chunk": i} for i in range(len(chunk_texts))]
+    try:
+        text = extract_text(filepath)
+        if text:
+            chunk_size = 1000
+            chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            chunk_ids = [f"{chat_id}_{os.path.basename(filepath)}_chunk_{i}" for i in range(len(chunk_texts))]
+            metadatas = [{"chat_id": chat_id, "source": filepath, "chunk": i} for i in range(len(chunk_texts))]
 
-                get_rag_processor().collection.add(
-                    documents=chunk_texts,
-                    ids=chunk_ids,
-                    metadatas=metadatas
-                )
-                print(f"File '{filepath}' added to ChromaDB in {len(chunk_texts)} chunks.")
-                return chunk_ids
-            else:
-                print(f"No text extracted from file '{filepath}'. Skipping addition to ChromaDB.")
-            return []
+            get_rag_processor().collection.add(
+                documents=chunk_texts,
+                ids=chunk_ids,
+                metadatas=metadatas
+            )
+            print(f"File '{filepath}' added to ChromaDB in {len(chunk_texts)} chunks.")
+            return chunk_ids
+        else:
+            print(f"No text extracted from file '{filepath}'. Skipping addition to ChromaDB.")
+        return []
 
-        except Exception as e:
-            print(f"Error adding file '{filepath}' to ChromaDB: {e}")
-            return []
-    else:
-        return _send_cmd("add_file_to_chat", filepath, chat_id=chat_id)
+    except Exception as e:
+        print(f"Error adding file '{filepath}' to ChromaDB: {e}")
+        return []
 
 def add_text_to_chat(text, source, chat_id=None):
     """Embed arbitrary text into ChromaDB with an associated source string."""
-    if _IN_WORKER:
-        try:
-            if text:
-                chunk_size = 1000
-                chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-                chunk_ids = [f"{chat_id}_{source}_chunk_{i}" for i in range(len(chunk_texts))]
-                metadatas = [{"chat_id": chat_id, "source": source, "chunk": i} for i in range(len(chunk_texts))]
+    try:
+        if text:
+            chunk_size = 1000
+            chunk_texts = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            chunk_ids = [f"{chat_id}_{source}_chunk_{i}" for i in range(len(chunk_texts))]
+            metadatas = [{"chat_id": chat_id, "source": source, "chunk": i} for i in range(len(chunk_texts))]
 
-                get_rag_processor().collection.add(
-                    documents=chunk_texts,
-                    ids=chunk_ids,
-                    metadatas=metadatas
-                )
-                print(f"Text from '{source}' added to ChromaDB in {len(chunk_texts)} chunks.")
-                return chunk_ids
-            else:
-                print(f"No text provided for source '{source}'. Skipping addition to ChromaDB.")
-                return []
-
-        except Exception as e:
-            print(f"Error adding text for source '{source}' to ChromaDB: {e}")
+            get_rag_processor().collection.add(
+                documents=chunk_texts,
+                ids=chunk_ids,
+                metadatas=metadatas
+            )
+            print(f"Text from '{source}' added to ChromaDB in {len(chunk_texts)} chunks.")
+            return chunk_ids
+        else:
+            print(f"No text provided for source '{source}'. Skipping addition to ChromaDB.")
             return []
-    else:
-        return _send_cmd("add_text_to_chat", text, source, chat_id=chat_id)
+
+    except Exception as e:
+        print(f"Error adding text for source '{source}' to ChromaDB: {e}")
+        return []
 
 def delete_file_from_chromadb(filepath):
     doc_id = os.path.basename(filepath)
@@ -190,84 +121,69 @@ def delete_file_from_chromadb(filepath):
     print(f"File '{filepath}' (ID: {doc_id}) deleted from ChromaDB.")
 
 def delete_file_from_chat(filepath, chat_id=None):
-    if _IN_WORKER:
-        rag_processor = get_rag_processor()
-        results = rag_processor.collection.get(where={"chat_id": chat_id})
-        ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == filepath]
-        if ids:
-            rag_processor.collection.delete(ids=ids)
-            print(f"Deleted {len(ids)} chunks for file '{filepath}' in chat '{chat_id}' from ChromaDB.")
-            return len(ids)
-        print(f"No chunks found for file '{filepath}' in chat '{chat_id}'.")
-        return 0
-    else:
-        return _send_cmd("delete_file_from_chat", filepath, chat_id=chat_id)
+    rag_processor = get_rag_processor()
+    results = rag_processor.collection.get(where={"chat_id": chat_id})
+    ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == filepath]
+    if ids:
+        rag_processor.collection.delete(ids=ids)
+        print(f"Deleted {len(ids)} chunks for file '{filepath}' in chat '{chat_id}' from ChromaDB.")
+        return len(ids)
+    print(f"No chunks found for file '{filepath}' in chat '{chat_id}'.")
+    return 0
 
 def delete_source_from_chat(source, chat_id=None):
     """Delete all chunks associated with a specific source string."""
-    if _IN_WORKER:
-        rag_processor = get_rag_processor()
-        results = rag_processor.collection.get(where={"chat_id": chat_id})
-        ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == source]
-        if ids:
-            rag_processor.collection.delete(ids=ids)
-            print(f"Deleted {len(ids)} chunks for source '{source}' in chat '{chat_id}' from ChromaDB.")
-            return len(ids)
-        print(f"No chunks found for source '{source}' in chat '{chat_id}'.")
-        return 0
-    else:
-        return _send_cmd("delete_source_from_chat", source, chat_id=chat_id)
+    rag_processor = get_rag_processor()
+    results = rag_processor.collection.get(where={"chat_id": chat_id})
+    ids = [id_ for id_, meta in zip(results["ids"], results["metadatas"]) if meta.get("source") == source]
+    if ids:
+        rag_processor.collection.delete(ids=ids)
+        print(f"Deleted {len(ids)} chunks for source '{source}' in chat '{chat_id}' from ChromaDB.")
+        return len(ids)
+    print(f"No chunks found for source '{source}' in chat '{chat_id}'.")
+    return 0
 
 def delete_all_files_from_chat(chat_id=None):
-    if _IN_WORKER:
-        if not chat_id:
-            print("No chat_id provided.")
-            return 0
+    if not chat_id:
+        print("No chat_id provided.")
+        return 0
 
-        files = get_files_for_chat(chat_id)
-        if not files:
-            print(f"No files found for chat_id '{chat_id}'.")
-            return 0
+    files = get_files_for_chat(chat_id)
+    if not files:
+        print(f"No files found for chat_id '{chat_id}'.")
+        return 0
 
-        total_deleted_chunks = 0
-        for file_path in files:
-            deleted_chunks = delete_file_from_chat(file_path, chat_id)
-            total_deleted_chunks += deleted_chunks
+    total_deleted_chunks = 0
+    for file_path in files:
+        deleted_chunks = delete_file_from_chat(file_path, chat_id)
+        total_deleted_chunks += deleted_chunks
 
-        print(f"Total deleted chunks for chat_id '{chat_id}': {total_deleted_chunks}")
-        return total_deleted_chunks
-    else:
-        return _send_cmd("delete_all_files_from_chat", chat_id=chat_id)
+    print(f"Total deleted chunks for chat_id '{chat_id}': {total_deleted_chunks}")
+    return total_deleted_chunks
 
 def query_by_chat_id(chat_id: str, query: str, n_results: int = 5):
-    if _IN_WORKER:
-        results = get_rag_processor().collection.query(
-            query_texts=[query],
-            n_results=n_results,
-            where={"chat_id": chat_id}
-        )
+    results = get_rag_processor().collection.query(
+        query_texts=[query],
+        n_results=n_results,
+        where={"chat_id": chat_id}
+    )
 
-        docs = results.get("documents", [[]])[0]
-        metadatas = results.get("metadatas", [[]])[0]
+    docs = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
 
-        return [{"text": doc, "metadata": meta} for doc, meta in zip(docs, metadatas)]
-    else:
-        return _send_cmd("query_by_chat_id", chat_id, query, n_results=n_results)
+    return [{"text": doc, "metadata": meta} for doc, meta in zip(docs, metadatas)]
 
 def get_files_for_chat(chat_id: str):
-    if _IN_WORKER:
-        if not chat_id:
-            return []
-        results = get_rag_processor().collection.get(where={"chat_id": chat_id})
+    if not chat_id:
+        return []
+    results = get_rag_processor().collection.get(where={"chat_id": chat_id})
 
-        if not results or not results.get("metadatas"):
-            return []
+    if not results or not results.get("metadatas"):
+        return []
 
-        unique_files = {meta['source'] for meta in results["metadatas"] if 'source' in meta}
+    unique_files = {meta['source'] for meta in results["metadatas"] if 'source' in meta}
 
-        return list(unique_files)
-    else:
-        return _send_cmd("get_files_for_chat", chat_id)
+    return list(unique_files)
 
 def main():
     filename = os.path.join(PROJECT_ROOT, "rag", "richesrestaurant.pdf")
