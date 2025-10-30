@@ -17,6 +17,8 @@ from PIL import Image
 from rag.rag_manager import RAGManager
 from bs4 import BeautifulSoup
 import platform
+from urllib.parse import urljoin
+import urllib3
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "True").lower() == "true"
@@ -84,10 +86,94 @@ def fetch_url_text(url: str) -> str:
 
 load_dotenv()
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 APP_NAME="SlipStreamAI"
-API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
-API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
-PROXY_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
+DEFAULT_API_URL = os.getenv("PUBLISHED_API", "http://localhost:3000")
+DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
+DEFAULT_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+CURRENT_SERVER_CONFIG = None
+
+
+def normalize_base_url(url: str) -> str:
+    if not url:
+        return ""
+    return url.rstrip("/")
+
+
+def compose_url(base_url: str, path: str) -> str:
+    base = normalize_base_url(base_url)
+    if not path:
+        return base
+    return urljoin(f"{base}/", path.lstrip("/"))
+
+
+def to_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "y", "on")
+    return bool(value)
+
+
+def build_default_server_configs():
+    servers = [{
+        "name": "Proxy Server",
+        "base_url": normalize_base_url(DEFAULT_API_URL),
+        "auth_mode": "proxy",
+        "api_secret": DEFAULT_API_SECRET,
+        "api_key": "",
+        "models_path": "/mods",
+        "chat_path": "/v1/chat/completions",
+        "verify_ssl": DEFAULT_VERIFY_CERT,
+        "auto_summarize": True
+    }]
+
+    if OPENAI_API_KEY:
+        servers.append({
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com",
+            "auth_mode": "openai",
+            "api_secret": "",
+            "api_key": OPENAI_API_KEY,
+            "models_path": "/v1/models",
+            "chat_path": "/v1/chat/completions",
+            "verify_ssl": True,
+            "auto_summarize": True
+        })
+    return servers
+
+
+def build_auth_headers(server_config: dict) -> dict:
+    headers = {}
+    auth_mode = (server_config or {}).get("auth_mode", "proxy")
+    if auth_mode == "proxy":
+        token = (server_config or {}).get("api_secret")
+        if token:
+            headers["x-api-secret"] = token
+    elif auth_mode == "openai":
+        api_key = (server_config or {}).get("api_key")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        header_name = (server_config or {}).get("custom_header_name")
+        header_value = (server_config or {}).get("custom_header_value")
+        if header_name and header_value:
+            headers[header_name] = header_value
+    return headers
+
+
+def set_current_server_config(config: dict):
+    global CURRENT_SERVER_CONFIG
+    CURRENT_SERVER_CONFIG = config
+
+
+def get_current_server_config() -> dict:
+    return CURRENT_SERVER_CONFIG
 
 # Default database path. This may be overridden via --db on the command line
 # and can be changed at runtime from the settings window.
@@ -141,18 +227,50 @@ def save_window_geometries(data):
     except Exception:
         pass
 
-def get_available_models():
+def get_available_models(server_config=None):
+    server = server_config or get_current_server_config()
+    if not server:
+        return ["gpt-3.5-turbo"]
+
+    fallback_model = server.get("default_model") or "gpt-3.5-turbo"
+    base_url = server.get("base_url", "")
+    if not base_url:
+        return [fallback_model]
+
+    models_path = server.get("models_path") or ("/mods" if server.get("auth_mode") == "proxy" else "/v1/models")
+    url = compose_url(base_url, models_path)
+    headers = build_auth_headers(server)
+    verify = bool(server.get("verify_ssl", True))
+
     try:
-        print(f"Fetching available models from {API_URL}/mods, PROXY_VERIFY_CERT={PROXY_VERIFY_CERT}")
-        response = requests.get(f"{API_URL}/mods", headers={"x-api-secret": API_SECRET},verify=PROXY_VERIFY_CERT)
+        print(f"Fetching available models from {url}, verify_ssl={verify}")
+        response = requests.get(url, headers=headers, verify=verify, timeout=10)
         response.raise_for_status()
-        models = response.json()
-        # The structure from the proxy is already a list of model objects
-        available_models = sorted([model['id'] for model in models['data']]) #if "gpt" in model['id']])
-        return available_models
+        payload = response.json()
+
+        model_ids = []
+        if isinstance(payload, dict):
+            if "data" in payload and isinstance(payload["data"], list):
+                data_list = payload["data"]
+                if data_list and isinstance(data_list[0], dict):
+                    model_ids = [item.get("id") for item in data_list if item.get("id")]
+                else:
+                    model_ids = [str(item) for item in data_list if item]
+            elif "models" in payload and isinstance(payload["models"], list):
+                model_ids = [str(item) for item in payload["models"] if item]
+        elif isinstance(payload, list):
+            if payload and isinstance(payload[0], dict):
+                model_ids = [item.get("id") for item in payload if item.get("id")]
+            else:
+                model_ids = [str(item) for item in payload if item]
+
+        cleaned_models = sorted({m for m in model_ids if m})
+        if cleaned_models:
+            return cleaned_models
     except Exception as e:
-        print(f"Error fetching models: {e}")
-        return ["gpt-3.5-turbo"] # Fallback to a default model
+        print(f"Error fetching models from {url}: {e}")
+
+    return [fallback_model]
 
 # --- Database ---
 def init_db():
@@ -195,6 +313,7 @@ def init_db():
                     value TEXT
                 )''')
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_rag', 'true')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_summarize_chats', 'True')")
     conn.commit()
     conn.close()
 
@@ -234,6 +353,283 @@ def save_setting(key, value):
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+
+
+class ServerManager:
+    SERVERS_KEY = "api_servers"
+    ACTIVE_SERVER_KEY = "active_server"
+
+    def __init__(self):
+        self._servers_cache = None
+
+    def load_servers(self):
+        if self._servers_cache is not None:
+            return list(self._servers_cache)
+
+        raw = get_setting(self.SERVERS_KEY)
+        servers = []
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    servers = data
+                elif isinstance(data, dict):
+                    servers = list(data.values())
+            except Exception as exc:
+                print(f"Failed to parse saved server configurations: {exc}")
+                servers = []
+
+        if not servers:
+            servers = build_default_server_configs()
+
+        normalized = [self._normalize_server(entry) for entry in servers if entry]
+        self._servers_cache = normalized
+        save_setting(self.SERVERS_KEY, json.dumps(normalized))
+        return list(normalized)
+
+    def save_servers(self, servers):
+        normalized = [self._normalize_server(entry) for entry in servers if entry]
+        self._servers_cache = normalized
+        save_setting(self.SERVERS_KEY, json.dumps(normalized))
+        return list(normalized)
+
+    def list_server_names(self):
+        return [server["name"] for server in self.load_servers()]
+
+    def get_server(self, name):
+        for server in self.load_servers():
+            if server["name"] == name:
+                return server
+        return None
+
+    def add_or_update_server(self, server):
+        servers = self.load_servers()
+        target_name = server.get("name")
+        original_name = server.get("original_name")
+        updated = False
+        for idx, existing in enumerate(servers):
+            if existing["name"] == target_name or (original_name and existing["name"] == original_name):
+                servers[idx] = self._normalize_server(server)
+                updated = True
+                break
+        if not updated:
+            if any(existing["name"] == target_name for existing in servers):
+                raise ValueError(f"A server named '{target_name}' already exists.")
+            servers.append(self._normalize_server(server))
+        self.save_servers(servers)
+        return self.get_server(target_name)
+
+    def delete_server(self, name):
+        servers = [server for server in self.load_servers() if server["name"] != name]
+        if not servers:
+            servers = build_default_server_configs()
+        self.save_servers(servers)
+        active_name = self.get_active_server_name()
+        if active_name == name:
+            self.set_active_server(servers[0]["name"])
+        return self.load_servers()
+
+    def get_active_server_name(self):
+        active_name = get_setting(self.ACTIVE_SERVER_KEY)
+        available_names = self.list_server_names()
+        if active_name in available_names:
+            return active_name
+        if available_names:
+            active_name = available_names[0]
+            self.set_active_server(active_name)
+            return active_name
+        return None
+
+    def get_active_server(self):
+        active_name = self.get_active_server_name()
+        return self.get_server(active_name)
+
+    def set_active_server(self, name):
+        if name and self.get_server(name):
+            save_setting(self.ACTIVE_SERVER_KEY, name)
+            self._servers_cache = None
+            self.load_servers()
+
+    def _normalize_server(self, entry):
+        entry = entry or {}
+        auth_mode = entry.get("auth_mode") or ("proxy" if entry.get("api_secret") else "openai")
+        base_url = normalize_base_url(entry.get("base_url", ""))
+        models_path = entry.get("models_path") or ("/mods" if auth_mode == "proxy" else "/v1/models")
+        chat_path = entry.get("chat_path") or "/v1/chat/completions"
+        name = entry.get("name") or (base_url or "Server")
+        auto_summarize = to_bool(entry.get("auto_summarize"), default=True)
+        return {
+            "name": name,
+            "base_url": base_url,
+            "auth_mode": auth_mode,
+            "api_secret": entry.get("api_secret", ""),
+            "api_key": entry.get("api_key", ""),
+            "models_path": models_path,
+            "chat_path": chat_path,
+            "verify_ssl": bool(entry.get("verify_ssl", True)),
+            "custom_header_name": entry.get("custom_header_name", ""),
+            "custom_header_value": entry.get("custom_header_value", ""),
+            "default_model": entry.get("default_model", "gpt-3.5-turbo"),
+            "auto_summarize": auto_summarize,
+            "timeout": entry.get("timeout", "")
+        }
+
+
+class ServerConfigDialog(simpledialog.Dialog):
+    def __init__(self, parent, title, server=None):
+        self.server = server or {}
+        self.original_name = self.server.get("name") if self.server else None
+        self.result = None
+        super().__init__(parent, title)
+
+    def body(self, master):
+        ttk.Label(master, text="Name:").grid(row=0, column=0, sticky="w")
+        self.name_var = tk.StringVar(value=self.server.get("name", ""))
+        self.name_entry = ttk.Entry(master, textvariable=self.name_var, width=40)
+        self.name_entry.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        ttk.Label(master, text="Base URL:").grid(row=1, column=0, sticky="w", pady=(5, 0))
+        self.base_var = tk.StringVar(value=self.server.get("base_url", ""))
+        self.base_entry = ttk.Entry(master, textvariable=self.base_var, width=40)
+        self.base_entry.grid(row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="Auth Mode:").grid(row=2, column=0, sticky="w", pady=(5, 0))
+        self.auth_mode_var = tk.StringVar(value=self.server.get("auth_mode", "proxy"))
+        self.auth_mode_combo = ttk.Combobox(master, textvariable=self.auth_mode_var, state="readonly")
+        self.auth_mode_combo['values'] = ("proxy", "openai", "custom")
+        self.auth_mode_combo.grid(row=2, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+        self.auth_mode_combo.bind('<<ComboboxSelected>>', lambda e: self._on_auth_mode_change())
+
+        ttk.Label(master, text="API Secret (proxy):").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        self.api_secret_var = tk.StringVar(value=self.server.get("api_secret", ""))
+        self.api_secret_entry = ttk.Entry(master, textvariable=self.api_secret_var, width=40)
+        self.api_secret_entry.grid(row=3, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="API Key (OpenAI):").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        self.api_key_var = tk.StringVar(value=self.server.get("api_key", ""))
+        self.api_key_entry = ttk.Entry(master, textvariable=self.api_key_var, width=40)
+        self.api_key_entry.grid(row=4, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="Custom Header Name:").grid(row=5, column=0, sticky="w", pady=(5, 0))
+        self.custom_header_name_var = tk.StringVar(value=self.server.get("custom_header_name", ""))
+        self.custom_header_name_entry = ttk.Entry(master, textvariable=self.custom_header_name_var, width=40)
+        self.custom_header_name_entry.grid(row=5, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="Custom Header Value:").grid(row=6, column=0, sticky="w", pady=(5, 0))
+        self.custom_header_value_var = tk.StringVar(value=self.server.get("custom_header_value", ""))
+        self.custom_header_value_entry = ttk.Entry(master, textvariable=self.custom_header_value_var, width=40)
+        self.custom_header_value_entry.grid(row=6, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="Models Path:").grid(row=7, column=0, sticky="w", pady=(5, 0))
+        self.models_path_var = tk.StringVar(value=self.server.get("models_path", ""))
+        self.models_path_entry = ttk.Entry(master, textvariable=self.models_path_var, width=40)
+        self.models_path_entry.grid(row=7, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="Chat Path:").grid(row=8, column=0, sticky="w", pady=(5, 0))
+        self.chat_path_var = tk.StringVar(value=self.server.get("chat_path", ""))
+        self.chat_path_entry = ttk.Entry(master, textvariable=self.chat_path_var, width=40)
+        self.chat_path_entry.grid(row=8, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        ttk.Label(master, text="Timeout (seconds, optional):").grid(row=9, column=0, sticky="w", pady=(5, 0))
+        timeout_value = self.server.get("timeout")
+        self.timeout_var = tk.StringVar(value=str(timeout_value) if timeout_value not in [None, ""] else "")
+        self.timeout_entry = ttk.Entry(master, textvariable=self.timeout_var, width=40)
+        self.timeout_entry.grid(row=9, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        available_models = get_available_models(self.server)
+        default_model = self.server.get("default_model")
+        if not default_model:
+            default_model = available_models[0] if available_models else "gpt-3.5-turbo"
+        self.default_model_var = tk.StringVar(value=default_model)
+        ttk.Label(master, text="Default Model:").grid(row=10, column=0, sticky="w", pady=(5, 0))
+        self.default_model_dropdown = ttk.Combobox(master, textvariable=self.default_model_var, state="readonly")
+        self.default_model_dropdown['values'] = available_models if available_models else [default_model]
+        self.default_model_dropdown.grid(row=10, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+
+        self.auto_summarize_var = tk.BooleanVar(value=to_bool(self.server.get("auto_summarize"), default=True))
+        self.auto_summarize_check = ttk.Checkbutton(master, text="Auto summarize chats?", variable=self.auto_summarize_var)
+        self.auto_summarize_check.grid(row=11, column=0, columnspan=2, sticky="w", padx=(5, 0), pady=(5, 0))
+
+        self.verify_var = tk.BooleanVar(value=bool(self.server.get("verify_ssl", True)))
+        self.verify_check = ttk.Checkbutton(master, text="Verify SSL certificates", variable=self.verify_var)
+        self.verify_check.grid(row=12, column=1, sticky="w", padx=(5, 0), pady=(5, 0))
+
+        self._on_auth_mode_change()
+
+        master.columnconfigure(1, weight=1)
+        return self.name_entry
+
+    def _on_auth_mode_change(self):
+        mode = self.auth_mode_var.get()
+        proxy_state = "normal" if mode == "proxy" else "disabled"
+        openai_state = "normal" if mode == "openai" else "disabled"
+        custom_state = "normal" if mode == "custom" else "disabled"
+
+        self.api_secret_entry.configure(state=proxy_state)
+        self.api_key_entry.configure(state=openai_state)
+        self.custom_header_name_entry.configure(state=custom_state)
+        self.custom_header_value_entry.configure(state=custom_state)
+
+        if not self.models_path_var.get().strip():
+            default_models_path = "/mods" if mode == "proxy" else "/v1/models"
+            self.models_path_var.set(default_models_path)
+        if not self.chat_path_var.get().strip():
+            self.chat_path_var.set("/v1/chat/completions")
+
+    def validate(self):
+        name = self.name_var.get().strip()
+        base = self.base_var.get().strip()
+        if not name:
+            messagebox.showerror("Validation Error", "Name is required.", parent=self)
+            return False
+        if not base:
+            messagebox.showerror("Validation Error", "Base URL is required.", parent=self)
+            return False
+        return True
+
+    def apply(self):
+        auth_mode = self.auth_mode_var.get()
+        models_path = self.models_path_var.get().strip() or ("/mods" if auth_mode == "proxy" else "/v1/models")
+        chat_path = self.chat_path_var.get().strip() or "/v1/chat/completions"
+        timeout_raw = self.timeout_var.get().strip()
+        timeout_value = ""
+        if timeout_raw:
+            try:
+                timeout_value = float(timeout_raw)
+            except ValueError:
+                timeout_value = timeout_raw
+
+        selected_default_model = self.default_model_var.get()
+        if not selected_default_model:
+            available_models = get_available_models({
+                "base_url": self.base_var.get().strip(),
+                "models_path": self.models_path_var.get().strip(),
+                "auth_mode": self.auth_mode_var.get(),
+                "api_secret": self.api_secret_var.get().strip(),
+                "api_key": self.api_key_var.get().strip(),
+                "verify_ssl": self.verify_var.get()
+            })
+            if available_models:
+                selected_default_model = available_models[0]
+            else:
+                selected_default_model = "gpt-3.5-turbo"
+
+        self.result = {
+            "name": self.name_var.get().strip(),
+            "base_url": self.base_var.get().strip(),
+            "auth_mode": auth_mode,
+            "api_secret": self.api_secret_var.get().strip(),
+            "api_key": self.api_key_var.get().strip(),
+            "custom_header_name": self.custom_header_name_var.get().strip(),
+            "custom_header_value": self.custom_header_value_var.get().strip(),
+            "models_path": models_path,
+            "chat_path": chat_path,
+            "default_model": selected_default_model,
+            "auto_summarize": self.auto_summarize_var.get(),
+            "verify_ssl": self.verify_var.get(),
+            "timeout": timeout_value,
+            "original_name": self.original_name,
+        }
 
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
@@ -376,15 +772,30 @@ def stream_and_process_response(resp, widget):
 
     return assistant_full_reply
 
-def send_to_api(session_name, messages, model, current_session_id, widget=None, save_message_to_db=True):
+def send_to_api(session_name, messages, model, current_session_id, server_config=None, widget=None, save_message_to_db=True):
+    server = server_config or get_current_server_config()
+    if not server:
+        raise ValueError("No server configured. Please configure a server in Settings.")
+
+    base_url = server.get("base_url", "")
+    chat_path = server.get("chat_path") or "/v1/chat/completions"
+    if not base_url:
+        raise ValueError("Selected server does not have a base URL configured.")
+
+    url = compose_url(base_url, chat_path)
+    verify = bool(server.get("verify_ssl", True))
+    headers = {"Content-Type": "application/json"}
+    headers.update(build_auth_headers(server))
+    timeout_raw = server.get("timeout", "")
+    try:
+        timeout = float(timeout_raw) if str(timeout_raw).strip() else 120
+    except (ValueError, TypeError):
+        timeout = 120
+
     payload = {
         "model": model,
         "messages": messages,
         "stream": True  # Enable streaming
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-secret": API_SECRET
     }
 
     assistant_full_reply = ""
@@ -394,7 +805,7 @@ def send_to_api(session_name, messages, model, current_session_id, widget=None, 
         widget.see(tk.END)
         widget.update_idletasks()
 
-    with requests.post(f"{API_URL}/v1/chat/completions", json=payload, headers=headers, stream=True, verify=PROXY_VERIFY_CERT) as resp:
+    with requests.post(url, json=payload, headers=headers, stream=True, verify=verify, timeout=timeout) as resp:
         resp.raise_for_status()
         assistant_full_reply = stream_and_process_response(resp, widget)
     
@@ -618,17 +1029,31 @@ class ChatApp(tk.Tk):
             self.icon_img = PhotoImage(file=icon_path)
             self.iconphoto(True, self.icon_img)  # ← this sets the window icon
         
+        # Track context menus for global dismissal
+        self.context_menus = []
+
         # Manager for optional RAG support using ChromaDB
         self.rag_manager = RAGManager()
 
         init_db()
+        self.server_manager = ServerManager()
+        self.server_configs = self.server_manager.load_servers()
+        self.current_server_config = self.server_manager.get_active_server()
+        if not self.current_server_config and self.server_configs:
+            self.current_server_config = self.server_configs[0]
+            self.server_manager.set_active_server(self.current_server_config["name"])
+        set_current_server_config(self.current_server_config)
+
         self.session_id = None
         self.session_name = None
         self.message_history = []
         self.history_index = -1
         self.chat_files = []
         self.rag_enabled = get_setting("enable_rag", "True") == "True"
-        
+
+        initial_server_name = self.current_server_config["name"] if self.current_server_config else ""
+        self.server_var = tk.StringVar(value=initial_server_name)
+
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
         self.chat_font = tk.StringVar(value=get_setting("chat_font", "TkDefaultFont"))
         self.chat_font_size = tk.IntVar(value=get_setting("chat_font_size", 10))
@@ -650,6 +1075,9 @@ class ChatApp(tk.Tk):
         self.apply_selection_colors()
         self.load_sessions()
         self.update_input_widgets_state()
+
+        self.bind_all("<Escape>", self.close_all_menus, add="+")
+        self.bind_all("<Button-1>", self._handle_global_click, add="+")
 
         self.bind("<Control-equal>", self.increase_font_size)
         self.bind("<Control-minus>", self.decrease_font_size)
@@ -733,6 +1161,123 @@ class ChatApp(tk.Tk):
         if self.session_id:
             selected_model = self.model_var.get()
             update_session_model(self.session_id, selected_model)
+
+    def refresh_model_dropdown(self, initial=False, preferred_model=None):
+        models = get_available_models(self.current_server_config)
+        if not models:
+            models = ["gpt-3.5-turbo"]
+
+        self.model_dropdown['values'] = models
+
+        target_model = preferred_model
+        if target_model and target_model in models:
+            self.model_var.set(target_model)
+        else:
+            if initial:
+                default_model = get_setting("default_model", models[0] if models else "gpt-3.5-turbo")
+                target_model = default_model if default_model in models else None
+            else:
+                current_model = self.model_var.get()
+                target_model = current_model if current_model in models else None
+
+            if not target_model and models:
+                target_model = models[0]
+
+            if target_model:
+                self.model_var.set(target_model)
+
+        if self.session_id:
+            update_session_model(self.session_id, self.model_var.get())
+
+    def refresh_server_dropdown(self, select_name=None):
+        names = self.server_manager.list_server_names()
+        self.server_dropdown['values'] = names
+
+        desired_name = select_name or self.server_manager.get_active_server_name()
+        if desired_name in names:
+            self.server_var.set(desired_name)
+        elif names:
+            self.server_var.set(names[0])
+            self.server_manager.set_active_server(names[0])
+        else:
+            self.server_var.set("")
+
+        current_name = self.server_var.get()
+        self.current_server_config = self.server_manager.get_server(current_name)
+        set_current_server_config(self.current_server_config)
+
+    def update_current_server_config(self, updates):
+        if not self.current_server_config:
+            return
+        updated_config = dict(self.current_server_config)
+        updated_config.update(updates)
+        updated_config["original_name"] = self.current_server_config.get("name")
+        saved_config = self.server_manager.add_or_update_server(updated_config)
+        self.current_server_config = saved_config
+        set_current_server_config(saved_config)
+
+    def auto_summarize_enabled(self):
+        if self.current_server_config is not None:
+            return to_bool(self.current_server_config.get("auto_summarize"), default=True)
+        return to_bool(get_setting("auto_summarize_chats", "True"), default=True)
+
+    def on_server_selected(self, event=None):
+        selected_name = self.server_var.get()
+        server = self.server_manager.get_server(selected_name)
+        if not server:
+            return
+        self.current_server_config = server
+        self.server_manager.set_active_server(selected_name)
+        set_current_server_config(server)
+        self.refresh_model_dropdown(initial=False)
+        self.show_status_message(f"Switched to server: {selected_name}")
+
+    def add_server(self):
+        dialog = ServerConfigDialog(self, "Add Server")
+        if getattr(dialog, "result", None):
+            try:
+                new_server = self.server_manager.add_or_update_server(dialog.result)
+            except ValueError as exc:
+                messagebox.showerror("Server Exists", str(exc), parent=self)
+                return
+            self.refresh_server_dropdown(select_name=new_server["name"])
+            self.refresh_model_dropdown(initial=True)
+            self.show_status_message(f"Added server '{new_server['name']}'")
+
+    def edit_current_server(self):
+        current_name = self.server_var.get()
+        current_server = self.server_manager.get_server(current_name)
+        if not current_server:
+            messagebox.showwarning("No Server", "No server is currently selected to edit.")
+            return
+
+        dialog = ServerConfigDialog(self, "Edit Server", server=current_server)
+        if getattr(dialog, "result", None):
+            try:
+                updated_server = self.server_manager.add_or_update_server(dialog.result)
+            except ValueError as exc:
+                messagebox.showerror("Server Exists", str(exc), parent=self)
+                return
+            self.refresh_server_dropdown(select_name=updated_server["name"])
+            self.refresh_model_dropdown(initial=False)
+            self.show_status_message(f"Updated server '{updated_server['name']}'")
+
+    def delete_current_server(self):
+        current_name = self.server_var.get()
+        if not current_name:
+            messagebox.showwarning("No Server", "No server is currently selected to delete.")
+            return
+
+        if not messagebox.askyesno("Delete Server", f"Are you sure you want to delete '{current_name}'?"):
+            return
+
+        self.server_manager.delete_server(current_name)
+        self.refresh_server_dropdown()
+        self.refresh_model_dropdown(initial=True)
+        if self.server_var.get():
+            self.show_status_message(f"Switched to server: {self.server_var.get()}")
+        else:
+            self.show_status_message("Server deleted.")
 
     def on_session_list_motion(self, event):
         try:
@@ -849,20 +1394,37 @@ class ChatApp(tk.Tk):
     def hide_session_tooltip(self, event=None):
         self.session_tooltip.hidetip()
         self.last_hovered_index = -1
+
+    def close_all_menus(self, event=None):
+        for menu in getattr(self, "context_menus", []):
+            try:
+                menu.unpost()
+            except tk.TclError:
+                pass
+
+    def _handle_global_click(self, event):
+        if isinstance(event.widget, tk.Menu):
+            return
+        self.close_all_menus()
     
     def show_session_context_menu(self, event):
+        self.close_all_menus()
         item = self.session_tree.identify_row(event.y)
         if not item:
             self.whitespace_context_menu.post(event.x_root, event.y_root)
             return
-        
+
         self.session_tree.selection_set(item)
         item_type = self.session_tree.item(item, "values")[1]
 
         if item_type == 'folder':
             self.session_context_menu.entryconfig("New Chat", state="normal")
+            self.session_context_menu.entryconfig("Auto Rename Chat", state="disabled")
+            self.session_context_menu.entryconfig("Summarize and Start New Chat", state="disabled")
         else:
             self.session_context_menu.entryconfig("New Chat", state="disabled")
+            self.session_context_menu.entryconfig("Auto Rename Chat", state="normal")
+            self.session_context_menu.entryconfig("Summarize and Start New Chat", state="normal")
 
         self.session_context_menu.post(event.x_root, event.y_root)
 
@@ -962,7 +1524,7 @@ class ChatApp(tk.Tk):
         self.left_frame = ttk.Frame(self.left_paned_window, width=200)
         self.left_paned_window.add(self.left_frame, weight=1)
         self.left_frame.columnconfigure(0, weight=1)
-        self.left_frame.rowconfigure(4, weight=1)
+        self.left_frame.rowconfigure(6, weight=1)
 
         # --- Database Selection ---
         self.db_label = ttk.Label(self.left_frame, text="Database:")
@@ -1004,18 +1566,34 @@ class ChatApp(tk.Tk):
 
         self.db_var.trace_add('write', on_db_change)
 
+        # --- Server Selection ---
+        self.server_label = ttk.Label(self.left_frame, text="Select Server:")
+        self.server_label.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 5))
+
+        self.server_dropdown = ttk.Combobox(self.left_frame, textvariable=self.server_var, state="readonly")
+        self.server_dropdown.grid(row=3, column=0, sticky="ew", padx=10, pady=2)
+        self.refresh_server_dropdown(select_name=self.server_var.get())
+        self.server_dropdown.bind('<<ComboboxSelected>>', self.on_server_selected)
+
+        self.server_manage_button = tk.Menubutton(self.left_frame, text="Manage", relief=tk.RAISED)
+        self.server_manage_menu = tk.Menu(self.server_manage_button, tearoff=0)
+        self.server_manage_menu.add_command(label="Add Server", command=self.add_server)
+        self.server_manage_menu.add_command(label="Edit Current", command=self.edit_current_server)
+        self.server_manage_menu.add_command(label="Delete Current", command=self.delete_current_server)
+        self.server_manage_button["menu"] = self.server_manage_menu
+        self.server_manage_button.grid(row=3, column=1, sticky="w", padx=5)
+
         # --- Model Selection ---
         self.model_label = ttk.Label(self.left_frame, text="Select Model:")
-        self.model_label.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 5))
+        self.model_label.grid(row=4, column=0, sticky="w", padx=10, pady=(10, 5))
         self.model_var = tk.StringVar()
         self.model_dropdown = ttk.Combobox(self.left_frame, textvariable=self.model_var, state="readonly")
-        self.model_dropdown.grid(row=3, column=0, sticky="ew", padx=10, pady=2)
-        self.model_dropdown['values'] = get_available_models()
-        self.model_dropdown.set("gpt-3.5-turbo")
+        self.model_dropdown.grid(row=5, column=0, sticky="ew", padx=10, pady=2)
         self.model_dropdown.bind('<<ComboboxSelected>>', self.on_model_selected)
+        self.refresh_model_dropdown(initial=True)
 
         self.session_tree = ttk.Treeview(self.left_frame, show="tree")
-        self.session_tree.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
+        self.session_tree.grid(row=6, column=0, sticky="nsew", padx=10, pady=10)
         self.session_tree.bind('<<TreeviewSelect>>', self.select_session)
         self.session_tree.bind('<Button-3>', self.show_session_context_menu)
         self.session_tree.bind("<B1-Motion>", self.move_item)
@@ -1036,22 +1614,30 @@ class ChatApp(tk.Tk):
         self.session_context_menu.add_command(label="New Folder", command=self.create_folder_from_context)
         self.session_context_menu.add_command(label="Rename", command=self.rename_session)
         self.session_context_menu.add_command(label="Delete", command=self.delete_session)
+        self.session_context_menu.add_separator()
+        self.session_context_menu.add_command(label="Auto Rename Chat", command=self.auto_rename_selected_session)
+        self.session_context_menu.add_command(label="Summarize and Start New Chat", command=self.summarize_and_start_new_chat)
 
         self.whitespace_context_menu = tk.Menu(self.session_tree, tearoff=0)
         self.whitespace_context_menu.add_command(label="New Chat", command=lambda: self.new_session(parent_id=None))
         self.whitespace_context_menu.add_command(label="New Folder", command=lambda: self.new_folder(parent_id=None))
 
+        self.context_menus.extend([
+            self.session_context_menu,
+            self.whitespace_context_menu
+        ])
+
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
-        self.new_button.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 2))
+        self.new_button.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 2))
 
         self.export_button = ttk.Button(self.left_frame, text="Export Chat", command=self.export_chat)
-        self.export_button.grid(row=6, column=0, sticky="ew", padx=10, pady=2)
+        self.export_button.grid(row=8, column=0, sticky="ew", padx=10, pady=2)
 
         self.import_button = ttk.Button(self.left_frame, text="Import Chat", command=self.import_chat)
-        self.import_button.grid(row=7, column=0, sticky="ew", padx=10, pady=2)
+        self.import_button.grid(row=9, column=0, sticky="ew", padx=10, pady=2)
 
         self.settings_button = ttk.Button(self.left_frame, text="Settings", command=self.open_settings)
-        self.settings_button.grid(row=8, column=0, sticky="ew", padx=10, pady=(2, 10))
+        self.settings_button.grid(row=10, column=0, sticky="ew", padx=10, pady=(2, 10))
 
         # --- Main Chat Area ---
         self.main_frame = ttk.Frame(self.left_paned_window)
@@ -1163,6 +1749,11 @@ class ChatApp(tk.Tk):
         respond_menu.add_command(label="Write a reply or response", command=lambda: self.process_selection("respond_reply"))
         respond_menu.add_command(label="Start a discussion from this", command=lambda: self.process_selection("respond_discuss"))
         self.selection_context_menu.add_cascade(label="Respond or Interact", menu=respond_menu)
+
+        self.context_menus.extend([
+            self.chat_history_menu,
+            self.selection_context_menu
+        ])
 
         self.input_container_frame = ttk.Frame(self.main_frame)
         self.input_container_frame.grid(row=1, column=0, sticky="ew")
@@ -1449,18 +2040,30 @@ class ChatApp(tk.Tk):
         # Default model settings
         ttk.Label(settings_win, text="Default Model:").grid(row=3, column=0, sticky="w", pady=5, padx=20)
         
-        default_model_var = tk.StringVar(value=get_setting("default_model", "gpt-3.5-turbo"))
-        
-        def on_default_model_change(*args):
-            save_setting("default_model", default_model_var.get())
+        auto_summarize_setting = None
+        if self.current_server_config:
+            auto_summarize_setting = self.current_server_config.get("auto_summarize")
+        if auto_summarize_setting is None:
+            auto_summarize_setting = to_bool(get_setting("auto_summarize_chats", "True"), default=True)
+        auto_summarize_var = tk.BooleanVar(value=to_bool(auto_summarize_setting, default=True))
 
-        default_model_dropdown = ttk.Combobox(settings_win, textvariable=default_model_var, state="readonly")
-        default_model_dropdown['values'] = get_available_models()
-        default_model_dropdown.grid(row=4, column=0, sticky="ew", padx=20)
-        default_model_var.trace_add("write", on_default_model_change)
+        def on_auto_summarize_change():
+            value = auto_summarize_var.get()
+            save_setting("auto_summarize_chats", "True" if value else "False")
+            self.update_current_server_config({"auto_summarize": value})
+            status_text = "Auto summarize enabled" if value else "Auto summarize disabled"
+            self.show_status_message(status_text)
+
+        auto_summarize_check = ttk.Checkbutton(
+            settings_win,
+            text="Auto summarize chats?",
+            variable=auto_summarize_var,
+            command=on_auto_summarize_change
+        )
+        auto_summarize_check.grid(row=5, column=0, sticky="w", padx=20)
 
         # Chat font settings
-        ttk.Label(settings_win, text="Chat Font:").grid(row=5, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Chat Font:").grid(row=6, column=0, sticky="w", pady=5, padx=20)
         
         def on_font_change(*args):
             save_setting("chat_font", self.chat_font.get())
@@ -1468,43 +2071,43 @@ class ChatApp(tk.Tk):
 
         font_families = sorted(font.families())
         font_dropdown = ttk.Combobox(settings_win, textvariable=self.chat_font, state="readonly", values=font_families)
-        font_dropdown.grid(row=6, column=0, sticky="ew", padx=20)
+        font_dropdown.grid(row=7, column=0, sticky="ew", padx=20)
         self.chat_font.trace_add("write", on_font_change)
 
         # Chat font size settings
-        ttk.Label(settings_win, text="Chat Font Size:").grid(row=7, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Chat Font Size:").grid(row=8, column=0, sticky="w", pady=5, padx=20)
 
         def on_font_size_change(*args):
             save_setting("chat_font_size", self.chat_font_size.get())
             self.apply_font()
 
         font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
-        font_size_spinbox.grid(row=8, column=0, sticky="ew", padx=20)
+        font_size_spinbox.grid(row=9, column=0, sticky="ew", padx=20)
         self.chat_font_size.trace_add("write", on_font_size_change)
 
         # UI font settings
-        ttk.Label(settings_win, text="UI Font:").grid(row=9, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="UI Font:").grid(row=10, column=0, sticky="w", pady=5, padx=20)
 
         def on_ui_font_change(*args):
             save_setting("ui_font", self.ui_font.get())
             self.apply_ui_font()
 
         ui_font_dropdown = ttk.Combobox(settings_win, textvariable=self.ui_font, state="readonly", values=font_families)
-        ui_font_dropdown.grid(row=10, column=0, sticky="ew", padx=20)
+        ui_font_dropdown.grid(row=11, column=0, sticky="ew", padx=20)
         self.ui_font.trace_add("write", on_ui_font_change)
 
         # UI font size settings
-        ttk.Label(settings_win, text="UI Font Size:").grid(row=11, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="UI Font Size:").grid(row=12, column=0, sticky="w", pady=5, padx=20)
 
         def on_ui_font_size_change(*args):
             save_setting("ui_font_size", self.ui_font_size.get())
             self.apply_ui_font()
 
         ui_font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
-        ui_font_size_spinbox.grid(row=12, column=0, sticky="ew", padx=20)
+        ui_font_size_spinbox.grid(row=13, column=0, sticky="ew", padx=20)
         self.ui_font_size.trace_add("write", on_ui_font_size_change)
 
-        ttk.Label(settings_win, text="Selection Background:").grid(row=13, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Selection Background:").grid(row=14, column=0, sticky="w", pady=5, padx=20)
 
         def choose_sel_bg():
             color = colorchooser.askcolor(initialcolor=self.selection_bg.get())[1]
@@ -1512,11 +2115,11 @@ class ChatApp(tk.Tk):
                 self.selection_bg.set(color)
 
         bg_frame = ttk.Frame(settings_win)
-        bg_frame.grid(row=14, column=0, sticky="ew", padx=20)
+        bg_frame.grid(row=15, column=0, sticky="ew", padx=20)
         ttk.Entry(bg_frame, textvariable=self.selection_bg).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(settings_win, text="Selection Foreground:").grid(row=15, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Selection Foreground:").grid(row=16, column=0, sticky="w", pady=5, padx=20)
 
         def choose_sel_fg():
             color = colorchooser.askcolor(initialcolor=self.selection_fg.get())[1]
@@ -1524,7 +2127,7 @@ class ChatApp(tk.Tk):
                 self.selection_fg.set(color)
 
         fg_frame = ttk.Frame(settings_win)
-        fg_frame.grid(row=16, column=0, sticky="ew", padx=20)
+        fg_frame.grid(row=17, column=0, sticky="ew", padx=20)
         ttk.Entry(fg_frame, textvariable=self.selection_fg).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).pack(side=tk.LEFT, padx=5)
 
@@ -1537,12 +2140,12 @@ class ChatApp(tk.Tk):
         self.selection_fg.trace_add("write", on_selection_color_change)
 
         # Enable RAG setting
-        ttk.Label(settings_win, text="Enable RAG (requires restart):").grid(row=17, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(settings_win, text="Enable RAG (requires restart):").grid(row=18, column=0, sticky="w", pady=5, padx=20)
         rag_var = tk.BooleanVar(value=self.rag_enabled)
         def on_rag_toggle():
             save_setting("enable_rag", rag_var.get())
             messagebox.showinfo("Restart Required", "Please restart the application for the RAG setting to take effect.", parent=settings_win)
-        ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=18, column=0, sticky="w", padx=20)
+        ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=19, column=0, sticky="w", padx=20)
 
     def export_chat(self):
         if not self.session_id:
@@ -1633,7 +2236,7 @@ class ChatApp(tk.Tk):
                     self.session_tree.focus(new_item)
                     self.select_session(None)
 
-                if imported_model in get_available_models():
+                if imported_model in get_available_models(self.current_server_config):
                     self.model_var.set(imported_model)
                 else:
                     self.model_var.set("gpt-3.5-turbo")
@@ -1895,6 +2498,7 @@ class ChatApp(tk.Tk):
             print(f"Error copying message: {e}")
 
     def show_chat_context_menu(self, event):
+        self.close_all_menus()
         if self.chat_history.tag_ranges("sel"):
             self.selection_context_menu.post(event.x_root, event.y_root)
         else:
@@ -1996,7 +2600,14 @@ class ChatApp(tk.Tk):
         self.update_idletasks()
 
         try:
-            send_to_api(self.session_name, message_blocks, self.model_var.get(), active_session_id, self.chat_history)
+            send_to_api(
+                self.session_name,
+                message_blocks,
+                self.model_var.get(),
+                active_session_id,
+                server_config=self.current_server_config,
+                widget=self.chat_history
+            )
         except Exception as e:
             messagebox.showerror("API Error", str(e))
 
@@ -2018,12 +2629,14 @@ class ChatApp(tk.Tk):
             messages = [{"role": "user", "content": prompt}]
             
             # Call send_to_api without a widget to get the response directly
+            summary_model = self.model_var.get()
             new_session_name = send_to_api(
-                "New Discussion", 
-                messages, 
-                "gpt-3.5-turbo", 
-                self.session_id, 
-                widget=None, 
+                "New Discussion",
+                messages,
+                summary_model,
+                self.session_id,
+                server_config=self.current_server_config,
+                widget=None,
                 save_message_to_db=False
             ).strip().strip('"') # Strip quotes from the response
 
@@ -2104,37 +2717,60 @@ class ChatApp(tk.Tk):
         self.chat_history.see(tk.END)
         self.chat_history.configure(state="disabled")
 
-    def summarize_and_rename_session(self):
+    def _collect_conversation(self, session_id):
+        messages = get_messages(session_id)
+        if len(messages) < 2:
+            return None, messages
+        conversation = "\n".join(f"{role.title()}: {content}" for role, content in messages)
+        return conversation, messages
+
+    def _generate_chat_title(self, session_id, conversation, current_name, model):
+        prompt = (
+            f"The current chat session name is '{current_name}'. Summarize the following conversation in 5 words or less. "
+            "This summary will be used as the new session name. Only change the name if a significant topic shift occurs. "
+            "Do not use quotes in the summary.\n\nConversation:\n"
+            f"{conversation}"
+        )
+        messages_for_summary = [
+            {"role": "system", "content": "You are a helpful assistant that summarizes chat sessions for use as a new session name."},
+            {"role": "user", "content": prompt}
+        ]
+        response = send_to_api(
+            current_name,
+            messages_for_summary,
+            model,
+            session_id,
+            server_config=self.current_server_config,
+            widget=None,
+            save_message_to_db=False
+        )
+        return response.strip().strip('"')
+
+    def _get_session_record(self, session_id):
+        for record in get_sessions():
+            if record[0] == session_id:
+                return record
+        return None
+
+    def summarize_and_rename_session(self, force=False):
         if not self.session_id or not self.session_name:
             return
 
-        messages = get_messages(self.session_id)
-        if len(messages) < 2: # Need at least one user and one assistant message
+        if not force and not self.auto_summarize_enabled():
             return
 
-        conversation = ""
-        for role, content in messages:
-            conversation += f"{role.title()}: {content}\n"
-
-        prompt = f"The current chat session name is '{self.session_name}'. Summarize the following conversation in 5 words or less. This summary will be used as the new session name. Only change the name if a significant topic shift occurs. Do not use quotes in the summary.\n\nConversation:\n{conversation}"
+        conversation, messages = self._collect_conversation(self.session_id)
+        if not conversation:
+            if force:
+                self.show_status_message("Not enough conversation to summarize", duration=3000)
+            return
 
         try:
-            messages_for_summary = [
-                {"role": "system", "content": "You are a helpful assistant that summarizes chat sessions for use as a new session name."},
-                {"role": "user", "content": prompt}
-            ]
-            
-            # Call send_to_api without a widget to get the response directly
-            new_name = send_to_api(
-                self.session_name, 
-                messages_for_summary, 
-                "gpt-3.5-turbo", 
-                self.session_id, 
-                widget=None,
-                save_message_to_db=False
-            ).strip().strip('"') # Strip quotes from the response
+            self.show_status_message("Updating chat summary...")
+            summary_model = self.model_var.get()
+            new_name = self._generate_chat_title(self.session_id, conversation, self.session_name, summary_model)
 
-            if new_name and new_name != self.session_name and len(new_name.split()) <= 5:
+            if new_name and new_name != self.session_name and len(new_name.split()) <= 7:
                 item_to_select = self.find_tree_item_by_id(self.session_id)
                 if not item_to_select:
                     return 
@@ -2146,9 +2782,120 @@ class ChatApp(tk.Tk):
                 self.session_tree.item(item_to_select, text=new_name)
                 self.title(f"{APP_NAME} - {self.session_name}")
 
+                self.show_status_message("Chat summary updated")
+            else:
+                self.show_status_message("Chat summary unchanged", duration=2000)
+
 
         except Exception as e:
             print(f"Error summarizing session: {e}")
+            self.show_status_message("Chat summary update failed", duration=4000)
+
+    def auto_rename_selected_session(self):
+        self.close_all_menus()
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        selected_item = selection[0]
+        session_id_str, item_type = self.session_tree.item(selected_item, "values")
+        if item_type == 'folder':
+            self.show_status_message("Select a chat to rename", duration=3000)
+            return
+        session_id = int(session_id_str)
+        self.session_tree.selection_set(selected_item)
+        self.session_tree.focus(selected_item)
+        self.select_session(None)
+        if self.session_id != session_id:
+            return
+        self.summarize_and_rename_session(force=True)
+
+    def summarize_and_start_new_chat(self):
+        self.close_all_menus()
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        selected_item = selection[0]
+        session_id_str, item_type = self.session_tree.item(selected_item, "values")
+        if item_type == 'folder':
+            self.show_status_message("Select a chat to summarize", duration=3000)
+            return
+        session_id = int(session_id_str)
+        self.session_tree.selection_set(selected_item)
+        self.session_tree.focus(selected_item)
+        self.select_session(None)
+        if self.session_id != session_id:
+            session_id = self.session_id
+
+        conversation, messages = self._collect_conversation(session_id)
+        if not conversation:
+            self.show_status_message("Not enough conversation to summarize", duration=3000)
+            return
+
+        try:
+            self.show_status_message("Creating summary chat...")
+            summary_prompt = (
+                "Create a concise summary of the following conversation in one to two paragraphs. "
+                "Capture the key ideas, decisions, and any suggested next steps. Use complete sentences."
+            )
+            summary_messages = [
+                {"role": "system", "content": "You summarize chats into concise, well-structured prose for quick review."},
+                {"role": "user", "content": f"{summary_prompt}\n\nConversation:\n{conversation}"}
+            ]
+            summary_model = self.model_var.get()
+            summary_text = send_to_api(
+                f"{self.session_name} Summary",
+                summary_messages,
+                summary_model,
+                session_id,
+                server_config=self.current_server_config,
+                widget=None,
+                save_message_to_db=False
+            ).strip()
+        except Exception as e:
+            self.show_status_message(f"Summary generation failed: {e}", duration=4000)
+            return
+
+        if not summary_text:
+            self.show_status_message("Summary generation returned empty response", duration=4000)
+            return
+
+        try:
+            new_title = self._generate_chat_title(session_id, conversation, self.session_name, summary_model)
+        except Exception as e:
+            print(f"Error generating summary chat title: {e}")
+            new_title = None
+
+        if not new_title:
+            new_title = f"{self.session_name} Summary"
+
+        record = self._get_session_record(session_id)
+        parent_id = None
+        system_prompt = ""
+        sp_id = None
+        model = summary_model
+        if record:
+            _, _, model, system_prompt, sp_id, parent_id, _ = record
+        else:
+            system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
+
+        new_session_id = create_session(
+            new_title,
+            model,
+            system_prompt,
+            parent_id=parent_id,
+            system_prompt_id=sp_id
+        )
+        save_message(new_session_id, "assistant", summary_text.strip())
+        self.load_sessions()
+
+        new_item = self.find_tree_item_by_id(new_session_id)
+        if new_item:
+            self.session_tree.selection_set(new_item)
+            self.session_tree.focus(new_item)
+            self.session_tree.see(new_item)
+            self.session_tree.event_generate('<<TreeviewSelect>>')
+
+        self.show_status_message(f"Created summary chat '{new_title}'", duration=4000)
 
     def close_files_dialog(self):
         if hasattr(self, 'files_window') and self.files_window.winfo_exists():
@@ -2190,6 +2937,8 @@ class ChatApp(tk.Tk):
         self.files_listbox_menu = tk.Menu(self.files_listbox, tearoff=0)
         self.files_listbox_menu.add_command(label="Remove", command=self.remove_selected_file)
         self.files_listbox.bind("<Button-3>", self.show_files_listbox_menu)
+        if self.files_listbox_menu not in self.context_menus:
+            self.context_menus.append(self.files_listbox_menu)
 
         self.update_files_listbox()
         self.create_files_listbox_tooltip()
@@ -2268,6 +3017,7 @@ class ChatApp(tk.Tk):
         self.files_listbox.bind('<Leave>', on_leave)
 
     def show_files_listbox_menu(self, event):
+        self.close_all_menus()
         try:
             selection_index = self.files_listbox.index(f"@{event.x},{event.y}")
             self.files_listbox.selection_clear(0, tk.END)
@@ -2363,7 +3113,14 @@ class ChatApp(tk.Tk):
         self.update_idletasks()
 
         try:
-            send_to_api(self.session_name, message_blocks, self.model_var.get(), active_session_id, self.chat_history)
+            send_to_api(
+                self.session_name,
+                message_blocks,
+                self.model_var.get(),
+                active_session_id,
+                server_config=self.current_server_config,
+                widget=self.chat_history
+            )
         except Exception as e:
             messagebox.showerror("API Error", str(e))
         
