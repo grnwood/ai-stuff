@@ -3,6 +3,7 @@ from docx import Document
 from ocr.tesseract import is_tesseract
 from ocr.tesseract import extract_text_from_pdf
 import os
+import mimetypes
 from rag_manager import RAGManager
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -47,8 +48,55 @@ def unload_rag_processor():
             gc.collect()
             print(f"[RAG] RAGProcessor unloaded to free memory")
 
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".rst",
+    ".py", ".js", ".ts", ".jsx", ".tsx",
+    ".html", ".htm", ".css",
+    ".json", ".yaml", ".yml", ".ini", ".cfg", ".toml",
+    ".csv", ".tsv",
+    ".log",
+    ".java", ".c", ".cpp", ".h", ".hpp", ".go", ".rs", ".rb", ".php", ".swift", ".kt",
+}
+
+
+def _read_text_file(filepath):
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
+
+def _looks_like_text(filepath):
+    mime, _ = mimetypes.guess_type(filepath)
+    if mime:
+        if mime.startswith("text/") or mime in ("application/json", "application/xml"):
+            return True
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in TEXT_EXTENSIONS:
+        return True
+    try:
+        with open(filepath, "rb") as f:
+            chunk = f.read(2048)
+            if not chunk:
+                return True
+            if b"\0" in chunk:
+                return False
+            try:
+                chunk.decode("utf-8")
+                return True
+            except UnicodeDecodeError:
+                chunk.decode("utf-8", errors="ignore")
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def extract_text(filepath):
-    if filepath.lower().endswith(".pdf"):
+    filepath_lower = filepath.lower()
+    if filepath_lower.endswith(".pdf"):
         doc = fitz.open(filepath)
         text = "\n".join(page.get_text() for page in doc)
         doc.close()
@@ -60,12 +108,14 @@ def extract_text(filepath):
                 print(f"No text discovered in PDF and Tesseract is not available. Returning empty string.")
                 return ""
         return text
-    elif filepath.lower().endswith(".docx"):
+    elif filepath_lower.endswith(".docx"):
         doc = Document(filepath)
         text = "\n".join([p.text for p in doc.paragraphs])
         return text
+    elif _looks_like_text(filepath):
+        return _read_text_file(filepath)
     else:
-        raise ValueError("Unsupported file type. Only PDF and DOCX are supported.")
+        raise ValueError("Unsupported file type. Only PDF, DOCX, or textual files are supported.")
 
 def add_file_to_chat(filepath, chat_id=None):
     try:
@@ -89,7 +139,7 @@ def add_file_to_chat(filepath, chat_id=None):
 
     except Exception as e:
         print(f"Error adding file '{filepath}' to ChromaDB: {e}")
-        return []
+        raise
 
 def add_text_to_chat(text, source, chat_id=None):
     """Embed arbitrary text into ChromaDB with an associated source string."""

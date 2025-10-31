@@ -3079,6 +3079,7 @@ class ChatApp(tk.Tk):
         self.files_window.transient(self)
         self.files_window.grab_set()
         self.files_window.protocol("WM_DELETE_WINDOW", self.close_files_dialog)
+        self.files_window.bind("<Escape>", lambda event: (self.close_files_dialog(), "break"))
 
         frame = ttk.Frame(self.files_window, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
