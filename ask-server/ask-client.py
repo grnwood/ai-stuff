@@ -130,6 +130,7 @@ def build_default_server_configs():
         "models_path": "/mods",
         "chat_path": "/v1/chat/completions",
         "verify_ssl": DEFAULT_VERIFY_CERT,
+        "default_model": "gpt-3.5-turbo",
         "auto_summarize": True
     }]
 
@@ -143,6 +144,7 @@ def build_default_server_configs():
             "models_path": "/v1/models",
             "chat_path": "/v1/chat/completions",
             "verify_ssl": True,
+            "default_model": "gpt-3.5-turbo",
             "auto_summarize": True
         })
     return servers
@@ -285,6 +287,7 @@ def init_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
                     model TEXT DEFAULT 'gpt-3.5-turbo',
+                    last_model_used TEXT DEFAULT 'gpt-3.5-turbo',
                     system_prompt TEXT,
                     system_prompt_id INTEGER,
                     parent_id INTEGER,
@@ -295,6 +298,8 @@ def init_db():
     cols = [row[1] for row in c.fetchall()]
     if 'system_prompt_id' not in cols:
         c.execute('ALTER TABLE sessions ADD COLUMN system_prompt_id INTEGER')
+    if 'last_model_used' not in cols:
+        c.execute("ALTER TABLE sessions ADD COLUMN last_model_used TEXT DEFAULT 'gpt-3.5-turbo'")
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     session_id INTEGER,
                     role TEXT,
@@ -634,17 +639,17 @@ class ServerConfigDialog(simpledialog.Dialog):
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, model, system_prompt, system_prompt_id, parent_id, type FROM sessions ORDER BY id")
+    c.execute("SELECT id, name, model, last_model_used, system_prompt, system_prompt_id, parent_id, type FROM sessions ORDER BY id")
     sessions = c.fetchall()
     conn.close()
     return sessions
 
-def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None, system_prompt_id=None):
+def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None, system_prompt_id=None, last_model_used=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO sessions (name, model, system_prompt, system_prompt_id, type, parent_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (name, model, system_prompt, system_prompt_id, type, parent_id),
+        "INSERT INTO sessions (name, model, last_model_used, system_prompt, system_prompt_id, type, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, model, last_model_used or model, system_prompt, system_prompt_id, type, parent_id),
     )
     conn.commit()
     session_id = c.lastrowid
@@ -671,6 +676,14 @@ def update_session_system_prompt_id(session_id, prompt_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE sessions SET system_prompt_id = ? WHERE id = ?", (prompt_id, session_id))
+    conn.commit()
+    conn.close()
+
+
+def update_session_last_model_used(session_id, model):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET last_model_used = ? WHERE id = ?", (model, session_id))
     conn.commit()
     conn.close()
 
@@ -1050,6 +1063,7 @@ class ChatApp(tk.Tk):
         self.history_index = -1
         self.chat_files = []
         self.rag_enabled = get_setting("enable_rag", "True") == "True"
+        self.last_model_used = None
 
         initial_server_name = self.current_server_config["name"] if self.current_server_config else ""
         self.server_var = tk.StringVar(value=initial_server_name)
@@ -1174,8 +1188,12 @@ class ChatApp(tk.Tk):
             self.model_var.set(target_model)
         else:
             if initial:
-                default_model = get_setting("default_model", models[0] if models else "gpt-3.5-turbo")
-                target_model = default_model if default_model in models else None
+                default_model = None
+                if self.current_server_config:
+                    default_model = self.current_server_config.get("default_model")
+                if default_model not in models:
+                    default_model = None
+                target_model = default_model if default_model else (models[0] if models else None)
             else:
                 current_model = self.model_var.get()
                 target_model = current_model if current_model in models else None
@@ -1421,10 +1439,12 @@ class ChatApp(tk.Tk):
             self.session_context_menu.entryconfig("New Chat", state="normal")
             self.session_context_menu.entryconfig("Auto Rename Chat", state="disabled")
             self.session_context_menu.entryconfig("Summarize and Start New Chat", state="disabled")
+            self.session_context_menu.entryconfig("Copy Chat", state="disabled")
         else:
             self.session_context_menu.entryconfig("New Chat", state="disabled")
             self.session_context_menu.entryconfig("Auto Rename Chat", state="normal")
             self.session_context_menu.entryconfig("Summarize and Start New Chat", state="normal")
+            self.session_context_menu.entryconfig("Copy Chat", state="normal")
 
         self.session_context_menu.post(event.x_root, event.y_root)
 
@@ -1617,6 +1637,7 @@ class ChatApp(tk.Tk):
         self.session_context_menu.add_separator()
         self.session_context_menu.add_command(label="Auto Rename Chat", command=self.auto_rename_selected_session)
         self.session_context_menu.add_command(label="Summarize and Start New Chat", command=self.summarize_and_start_new_chat)
+        self.session_context_menu.add_command(label="Copy Chat", command=self.copy_selected_session)
 
         self.whitespace_context_menu = tk.Menu(self.session_tree, tearoff=0)
         self.whitespace_context_menu.add_command(label="New Chat", command=lambda: self.new_session(parent_id=None))
@@ -1686,6 +1707,8 @@ class ChatApp(tk.Tk):
         self.chat_history.tag_config("p", spacing1=2, spacing3=2)
         self.chat_history.tag_config("li", lmargin1=20, lmargin2=20)
         self.chat_history.tag_config("table", font=("Courier", 10), lmargin1=10, lmargin2=10)
+        self.chat_history.tag_config("system_note", font=("TkDefaultFont", 10, "italic"), foreground="#6c737c")
+        s.configure("System.TLabel", font=("TkDefaultFont", 9, "italic"), foreground="#6c737c")
 
         self.chat_history_menu = tk.Menu(self.chat_history, tearoff=0)
         self.chat_history_menu.add_command(label="Copy", command=self.copy_chat_selection)
@@ -1758,27 +1781,39 @@ class ChatApp(tk.Tk):
         self.input_container_frame = ttk.Frame(self.main_frame)
         self.input_container_frame.grid(row=1, column=0, sticky="ew")
         self.input_container_frame.columnconfigure(0, weight=1)
-        self.input_container_frame.rowconfigure(0, weight=1)
+        self.input_container_frame.rowconfigure(0, weight=0)
         self.input_container_frame.rowconfigure(1, weight=1)
+        self.input_container_frame.rowconfigure(2, weight=0)
+
+        self.last_model_label = ttk.Label(self.input_container_frame, text="", style="System.TLabel")
+        self.last_model_label.grid(row=0, column=0, sticky="w", padx=5, pady=(4, 2))
+
+        input_frame = ttk.Frame(self.input_container_frame)
+        input_frame.grid(row=1, column=0, sticky="nsew")
+        input_frame.columnconfigure(0, weight=1)
 
         self.input_box = tk.Text(
-            self.input_container_frame,
+            input_frame,
             height=5,
             wrap=tk.WORD,
             selectbackground=self.selection_bg.get(),
             selectforeground=self.selection_fg.get()
         )
-        self.input_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        self.input_box.grid(row=0, column=0, sticky="nsew")
         self.input_box.bind("<Control-Return>", self.send_message)
         self.input_box.bind("<Up>", self.history_up_wrapper)
         self.input_box.bind("<Down>", self.history_down_wrapper)
 
-        self.send_button = ttk.Button(self.input_container_frame, text="Send", command=self.send_message)
-        self.send_button.grid(row=0, column=1, sticky="nsew")
+        button_frame = ttk.Frame(input_frame)
+        button_frame.grid(row=0, column=1, sticky="ns")
+        button_frame.rowconfigure(0, weight=1)
+        button_frame.rowconfigure(1, weight=1)
 
-        # Files button directly below Send, no gap
-        self.files_button = ttk.Button(self.input_container_frame, text="Files", command=self.open_files_dialog)
-        self.files_button.grid(row=1, column=1, sticky="nsew")
+        self.send_button = ttk.Button(button_frame, text="Send", command=self.send_message)
+        self.send_button.grid(row=0, column=0, sticky="ew", padx=(5, 0))
+
+        self.files_button = ttk.Button(button_frame, text="Files", command=self.open_files_dialog)
+        self.files_button.grid(row=1, column=0, sticky="ew", padx=(5, 0), pady=(5, 0))
 
         # --- Right Panel (System Prompt) ---
         self.right_frame = ttk.Frame(self.main_paned_window, width=250)
@@ -2156,12 +2191,13 @@ class ChatApp(tk.Tk):
         
         # Get the current session's details
         current_session_info = None
-        for _id, name, model, system_prompt, sp_id, parent_id, type in get_sessions():
+        for _id, name, model, last_model_used, system_prompt, sp_id, parent_id, type in get_sessions():
             if _id == self.session_id:
                 current_session_info = {
                     "model": model,
                     "messages": messages,
-                    "system_prompt": system_prompt
+                    "system_prompt": system_prompt,
+                    "last_model_used": last_model_used or model
                 }
                 break
         
@@ -2196,9 +2232,11 @@ class ChatApp(tk.Tk):
                 imported_model = "gpt-3.5-turbo"
                 imported_messages = []
                 imported_system_prompt = ""
+                imported_last_model = imported_model
 
                 if isinstance(imported_data, dict) and "messages" in imported_data:
                     imported_model = imported_data.get("model", "gpt-3.5-turbo")
+                    imported_last_model = imported_data.get("last_model_used", imported_model)
                     imported_messages = imported_data["messages"]
                     imported_system_prompt = imported_data.get("system_prompt", "")
                 elif isinstance(imported_data, list):
@@ -2224,7 +2262,13 @@ class ChatApp(tk.Tk):
                     if item_type == 'folder':
                         parent_id = self.session_tree.item(selected_item, "values")[0]
 
-                session_id = create_session(new_session_name, imported_model, imported_system_prompt, parent_id=parent_id)
+                session_id = create_session(
+                    new_session_name,
+                    imported_model,
+                    imported_system_prompt,
+                    parent_id=parent_id,
+                    last_model_used=imported_last_model
+                )
                 for role, content in imported_messages:
                     save_message(session_id, role, content)
 
@@ -2315,7 +2359,7 @@ class ChatApp(tk.Tk):
         name = tk.simpledialog.askstring("New Folder", "Enter folder name:")
         if name:
             db_parent_id = int(parent_id) if parent_id is not None else None
-            session_id = create_session(name, type='folder', parent_id=db_parent_id)
+            session_id = create_session(name, model='gpt-3.5-turbo', type='folder', parent_id=db_parent_id, last_model_used='gpt-3.5-turbo')
             parent_node = self.find_tree_item_by_id(parent_id) if parent_id is not None else ""
             if parent_node is None:
                 parent_node = ""
@@ -2332,7 +2376,7 @@ class ChatApp(tk.Tk):
         session_map = {s[0]: s for s in sessions}
 
         def add_to_tree(parent_id, parent_node=""):
-            for _id, name, model, system_prompt, sp_id, s_parent_id, type in sessions:
+            for _id, name, model, last_model_used, system_prompt, sp_id, s_parent_id, type in sessions:
                 if s_parent_id == parent_id:
                     icon = self.chat_icon if type == 'chat' else self.folder_icon
                     node = self.session_tree.insert(parent_node, "end", text=name, values=(str(_id), type), image=icon)
@@ -2358,6 +2402,7 @@ class ChatApp(tk.Tk):
         if type == 'folder':
             self.session_id = None
             self.session_name = None
+            self.last_model_used = None
             self.title(f"{APP_NAME} Client")
             self.chat_history.configure(state="normal")
             self.chat_history.delete("1.0", tk.END)
@@ -2365,14 +2410,16 @@ class ChatApp(tk.Tk):
             self.chat_files = []
             self.update_files_listbox()
             self.update_input_widgets_state()
+            self.refresh_last_model_label()
             return
 
-        for sid, name, model, system_prompt, sp_id, parent_id, stype in get_sessions():
+        for sid, name, model, last_model_used, system_prompt, sp_id, parent_id, stype in get_sessions():
             if sid == _id:
                 self.session_name = name
                 self.session_id = _id
                 self.title(f"{APP_NAME} - {self.session_name}")
                 self.model_var.set(model)
+                self.last_model_used = last_model_used or model
                 
                 # Load system prompt
                 self.system_prompt_text.delete("1.0", tk.END)
@@ -2395,14 +2442,17 @@ class ChatApp(tk.Tk):
                 self.history_index = len(self.message_history)
                 self.current_input_buffer = ""
                 self.update_input_widgets_state()
+                self.refresh_last_model_label()
                 break
         else:
             self.title(f"{APP_NAME}")
+            self.last_model_used = None
             self.update_input_widgets_state()
+            self.refresh_last_model_label()
             return
 
     def get_session_id_by_name(self, name):
-        for _id, s_name, model, system_prompt, sp_id, parent_id, type in get_sessions():
+        for _id, s_name, model, last_model_used, system_prompt, sp_id, parent_id, type in get_sessions():
             if s_name == name:
                 return _id
         return None
@@ -2436,7 +2486,12 @@ class ChatApp(tk.Tk):
 
     def new_session(self, parent_id=None):
         name = f"Session {len(get_sessions()) + 1}"
-        default_model = get_setting("default_model", "gpt-3.5-turbo")
+        default_model = None
+        if self.current_server_config:
+            default_model = self.current_server_config.get("default_model")
+        available_models = get_available_models(self.current_server_config)
+        if not default_model or default_model not in available_models:
+            default_model = available_models[0] if available_models else "gpt-3.5-turbo"
         
         if parent_id is None:
             selection = self.session_tree.selection()
@@ -2451,7 +2506,8 @@ class ChatApp(tk.Tk):
             name,
             default_model,
             parent_id=db_parent_id,
-            system_prompt_id=getattr(self, "current_system_prompt_id", None)
+            system_prompt_id=getattr(self, "current_system_prompt_id", None),
+            last_model_used=default_model
         )
         
         parent_node = self.find_tree_item_by_id(parent_id) if parent_id is not None else ""
@@ -2648,7 +2704,8 @@ class ChatApp(tk.Tk):
                 new_session_name,
                 self.model_var.get(),
                 self.system_prompt_text.get("1.0", tk.END).strip(),
-                system_prompt_id=getattr(self, "current_system_prompt_id", None)
+                system_prompt_id=getattr(self, "current_system_prompt_id", None),
+                last_model_used=self.model_var.get()
             )
             save_message(new_session_id, "user", f"Let's discuss the following:\n\n{selected_text}")
             self.load_sessions()
@@ -2751,6 +2808,13 @@ class ChatApp(tk.Tk):
             if record[0] == session_id:
                 return record
         return None
+
+    def refresh_last_model_label(self):
+        if hasattr(self, "last_model_label"):
+            if self.last_model_used:
+                self.last_model_label.configure(text=f"Last model used: {self.last_model_used}")
+            else:
+                self.last_model_label.configure(text="")
 
     def summarize_and_rename_session(self, force=False):
         if not self.session_id or not self.session_name:
@@ -2873,8 +2937,9 @@ class ChatApp(tk.Tk):
         system_prompt = ""
         sp_id = None
         model = summary_model
+        last_model_used = summary_model
         if record:
-            _, _, model, system_prompt, sp_id, parent_id, _ = record
+            _, _, model, _, system_prompt, sp_id, parent_id, _ = record
         else:
             system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
 
@@ -2883,7 +2948,8 @@ class ChatApp(tk.Tk):
             model,
             system_prompt,
             parent_id=parent_id,
-            system_prompt_id=sp_id
+            system_prompt_id=sp_id,
+            last_model_used=last_model_used
         )
         save_message(new_session_id, "assistant", summary_text.strip())
         self.load_sessions()
@@ -2896,6 +2962,50 @@ class ChatApp(tk.Tk):
             self.session_tree.event_generate('<<TreeviewSelect>>')
 
         self.show_status_message(f"Created summary chat '{new_title}'", duration=4000)
+
+    def copy_selected_session(self):
+        self.close_all_menus()
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        selected_item = selection[0]
+        session_id_str, item_type = self.session_tree.item(selected_item, "values")
+        if item_type == 'folder':
+            self.show_status_message("Select a chat to copy", duration=3000)
+            return
+
+        session_id = int(session_id_str)
+        record = self._get_session_record(session_id)
+        if not record:
+            self.show_status_message("Unable to load chat for copying", duration=3000)
+            return
+
+        _, name, model, last_model_used, system_prompt, system_prompt_id, parent_id, _ = record
+
+        conversation_messages = get_messages(session_id)
+        new_name = f"{name} (Copy)"
+
+        new_session_id = create_session(
+            new_name,
+            model,
+            system_prompt,
+            parent_id=parent_id,
+            system_prompt_id=system_prompt_id,
+            last_model_used=last_model_used or model
+        )
+
+        for role, content in conversation_messages:
+            save_message(new_session_id, role, content)
+
+        self.load_sessions()
+        new_item = self.find_tree_item_by_id(new_session_id)
+        if new_item:
+            self.session_tree.selection_set(new_item)
+            self.session_tree.focus(new_item)
+            self.session_tree.see(new_item)
+            self.session_tree.event_generate('<<TreeviewSelect>>')
+
+        self.show_status_message(f"Copied chat to '{new_name}'", duration=4000)
 
     def close_files_dialog(self):
         if hasattr(self, 'files_window') and self.files_window.winfo_exists():
@@ -3121,9 +3231,13 @@ class ChatApp(tk.Tk):
                 server_config=self.current_server_config,
                 widget=self.chat_history
             )
+            current_model = self.model_var.get()
+            update_session_last_model_used(active_session_id, current_model)
+            self.last_model_used = current_model
+            self.refresh_last_model_label()
         except Exception as e:
             messagebox.showerror("API Error", str(e))
-        
+
         # After the response, reload the history to show the assistant's message
         self.load_chat_history()
         
