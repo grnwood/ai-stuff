@@ -96,6 +96,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 CURRENT_SERVER_CONFIG = None
 
+SERVER_CONFIG_FILE = os.path.join(PROJECT_ROOT, "server_configs.json")
+
 
 def normalize_base_url(url: str) -> str:
     if not url:
@@ -298,6 +300,10 @@ def init_db():
     cols = [row[1] for row in c.fetchall()]
     if 'system_prompt_id' not in cols:
         c.execute('ALTER TABLE sessions ADD COLUMN system_prompt_id INTEGER')
+        cols.append('system_prompt_id')
+    if 'last_model_used' not in cols:
+        c.execute("ALTER TABLE sessions ADD COLUMN last_model_used TEXT DEFAULT 'gpt-3.5-turbo'")
+    c.execute("UPDATE sessions SET last_model_used = model WHERE last_model_used IS NULL OR last_model_used = ''")
     if 'last_model_used' not in cols:
         c.execute("ALTER TABLE sessions ADD COLUMN last_model_used TEXT DEFAULT 'gpt-3.5-turbo'")
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
@@ -363,39 +369,83 @@ def save_setting(key, value):
 class ServerManager:
     SERVERS_KEY = "api_servers"
     ACTIVE_SERVER_KEY = "active_server"
+    CONFIG_FILE = SERVER_CONFIG_FILE
 
     def __init__(self):
         self._servers_cache = None
+        self._data = self._load_file()
+
+    def _load_file(self):
+        data = {}
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            except Exception as exc:
+                print(f"Failed to load server configuration file: {exc}")
+
+        if not data:
+            legacy_raw = get_setting(self.SERVERS_KEY)
+            legacy_servers = []
+            if legacy_raw:
+                try:
+                    parsed = json.loads(legacy_raw)
+                    if isinstance(parsed, list):
+                        legacy_servers = parsed
+                    elif isinstance(parsed, dict):
+                        legacy_servers = list(parsed.values())
+                except Exception as exc:
+                    print(f"Failed to parse legacy server configuration: {exc}")
+            if legacy_servers:
+                data["servers"] = legacy_servers
+                legacy_active = get_setting(self.ACTIVE_SERVER_KEY)
+                if legacy_active:
+                    data["active_server"] = legacy_active
+
+        if "servers" not in data or not data.get("servers"):
+            data["servers"] = build_default_server_configs()
+
+        if not data.get("active_server") and data["servers"]:
+            data["active_server"] = data["servers"][0]["name"]
+
+        self._data = data
+        self._save_file()
+        return data
+
+    def _save_file(self):
+        try:
+            with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2)
+        except Exception as exc:
+            print(f"Failed to save server configuration file: {exc}")
 
     def load_servers(self):
         if self._servers_cache is not None:
             return list(self._servers_cache)
 
-        raw = get_setting(self.SERVERS_KEY)
-        servers = []
-        if raw:
-            try:
-                data = json.loads(raw)
-                if isinstance(data, list):
-                    servers = data
-                elif isinstance(data, dict):
-                    servers = list(data.values())
-            except Exception as exc:
-                print(f"Failed to parse saved server configurations: {exc}")
-                servers = []
-
+        servers = self._data.get("servers", [])
         if not servers:
             servers = build_default_server_configs()
 
         normalized = [self._normalize_server(entry) for entry in servers if entry]
         self._servers_cache = normalized
-        save_setting(self.SERVERS_KEY, json.dumps(normalized))
+        self._data["servers"] = normalized
+        if normalized and not self._data.get("active_server"):
+            self._data["active_server"] = normalized[0]["name"]
+        self._save_file()
         return list(normalized)
 
     def save_servers(self, servers):
         normalized = [self._normalize_server(entry) for entry in servers if entry]
         self._servers_cache = normalized
-        save_setting(self.SERVERS_KEY, json.dumps(normalized))
+        self._data["servers"] = normalized
+        if normalized and self._data.get("active_server") not in [srv["name"] for srv in normalized]:
+            self._data["active_server"] = normalized[0]["name"]
+        if not normalized:
+            self._data["active_server"] = None
+        self._save_file()
         return list(normalized)
 
     def list_server_names(self):
@@ -421,6 +471,8 @@ class ServerManager:
             if any(existing["name"] == target_name for existing in servers):
                 raise ValueError(f"A server named '{target_name}' already exists.")
             servers.append(self._normalize_server(server))
+        elif original_name and self._data.get("active_server") == original_name:
+            self._data["active_server"] = target_name
         self.save_servers(servers)
         return self.get_server(target_name)
 
@@ -430,12 +482,12 @@ class ServerManager:
             servers = build_default_server_configs()
         self.save_servers(servers)
         active_name = self.get_active_server_name()
-        if active_name == name:
+        if active_name == name and servers:
             self.set_active_server(servers[0]["name"])
         return self.load_servers()
 
     def get_active_server_name(self):
-        active_name = get_setting(self.ACTIVE_SERVER_KEY)
+        active_name = self._data.get("active_server")
         available_names = self.list_server_names()
         if active_name in available_names:
             return active_name
@@ -451,7 +503,8 @@ class ServerManager:
 
     def set_active_server(self, name):
         if name and self.get_server(name):
-            save_setting(self.ACTIVE_SERVER_KEY, name)
+            self._data["active_server"] = name
+            self._save_file()
             self._servers_cache = None
             self.load_servers()
 
@@ -463,6 +516,7 @@ class ServerManager:
         chat_path = entry.get("chat_path") or "/v1/chat/completions"
         name = entry.get("name") or (base_url or "Server")
         auto_summarize = to_bool(entry.get("auto_summarize"), default=True)
+        default_model = entry.get("default_model") or "gpt-3.5-turbo"
         return {
             "name": name,
             "base_url": base_url,
@@ -474,7 +528,7 @@ class ServerManager:
             "verify_ssl": bool(entry.get("verify_ssl", True)),
             "custom_header_name": entry.get("custom_header_name", ""),
             "custom_header_value": entry.get("custom_header_value", ""),
-            "default_model": entry.get("default_model", "gpt-3.5-turbo"),
+            "default_model": default_model,
             "auto_summarize": auto_summarize,
             "timeout": entry.get("timeout", "")
         }
@@ -1787,6 +1841,7 @@ class ChatApp(tk.Tk):
 
         self.last_model_label = ttk.Label(self.input_container_frame, text="", style="System.TLabel")
         self.last_model_label.grid(row=0, column=0, sticky="w", padx=5, pady=(4, 2))
+        self.refresh_last_model_label()
 
         input_frame = ttk.Frame(self.input_container_frame)
         input_frame.grid(row=1, column=0, sticky="nsew")
