@@ -17,7 +17,7 @@ from PIL import Image
 from rag.rag_manager import RAGManager
 from bs4 import BeautifulSoup
 import platform
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import urllib3
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -73,16 +73,47 @@ def fetch_url_text(url: str) -> str:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/114.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,/;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
     }
     resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    return soup.get_text(separator="\n")
+
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if not any(token in content_type for token in ("text", "html", "xml", "json")):
+        raise ValueError(f"Unsupported content type for URL: {content_type or 'unknown'}")
+
+    encoding_header = resp.headers.get("Content-Encoding", "").lower()
+    raw_content = resp.content
+    if "br" in encoding_header:
+        try:
+            import brotli  # type: ignore
+        except ImportError:
+            try:
+                import brotlicffi as brotli  # type: ignore
+            except ImportError:
+                raise ValueError("Response uses Brotli compression but no Brotli decoder is available.")
+        raw_content = brotli.decompress(raw_content)
+        text_encoding = resp.encoding or resp.apparent_encoding or "utf-8"
+        try:
+            html = raw_content.decode(text_encoding, errors="ignore")
+        except LookupError:
+            html = raw_content.decode("utf-8", errors="ignore")
+    else:
+        if not resp.encoding:
+            resp.encoding = resp.apparent_encoding or "utf-8"
+        try:
+            html = resp.text
+        except UnicodeDecodeError:
+            html = raw_content.decode(resp.encoding or "utf-8", errors="ignore")
+
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n")
+    filtered = "".join(ch if (ch.isprintable() or ch in "\n\t\r") else " " for ch in text)
+    cleaned_lines = [line.strip() for line in filtered.splitlines() if line.strip()]
+    return "\n".join(cleaned_lines)
 
 load_dotenv()
 
@@ -289,6 +320,7 @@ def init_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
                     model TEXT DEFAULT 'gpt-3.5-turbo',
+                    server_name TEXT,
                     last_model_used TEXT DEFAULT 'gpt-3.5-turbo',
                     system_prompt TEXT,
                     system_prompt_id INTEGER,
@@ -304,8 +336,8 @@ def init_db():
     if 'last_model_used' not in cols:
         c.execute("ALTER TABLE sessions ADD COLUMN last_model_used TEXT DEFAULT 'gpt-3.5-turbo'")
     c.execute("UPDATE sessions SET last_model_used = model WHERE last_model_used IS NULL OR last_model_used = ''")
-    if 'last_model_used' not in cols:
-        c.execute("ALTER TABLE sessions ADD COLUMN last_model_used TEXT DEFAULT 'gpt-3.5-turbo'")
+    if 'server_name' not in cols:
+        c.execute("ALTER TABLE sessions ADD COLUMN server_name TEXT")
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
                     session_id INTEGER,
                     role TEXT,
@@ -693,17 +725,20 @@ class ServerConfigDialog(simpledialog.Dialog):
 def get_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, model, last_model_used, system_prompt, system_prompt_id, parent_id, type FROM sessions ORDER BY id")
+    c.execute("""SELECT id, name, model, server_name, last_model_used, system_prompt, system_prompt_id, parent_id, type
+                 FROM sessions ORDER BY id""")
     sessions = c.fetchall()
     conn.close()
     return sessions
 
-def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None, system_prompt_id=None, last_model_used=None):
+def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None, system_prompt_id=None,
+                   last_model_used=None, server_name=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO sessions (name, model, last_model_used, system_prompt, system_prompt_id, type, parent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (name, model, last_model_used or model, system_prompt, system_prompt_id, type, parent_id),
+        """INSERT INTO sessions (name, model, server_name, last_model_used, system_prompt, system_prompt_id, type, parent_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (name, model, server_name, last_model_used or model, system_prompt, system_prompt_id, type, parent_id),
     )
     conn.commit()
     session_id = c.lastrowid
@@ -715,6 +750,13 @@ def update_session_model(session_id, model):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE sessions SET model = ? WHERE id = ?", (model, session_id))
+    conn.commit()
+    conn.close()
+
+def update_session_server(session_id, server_name):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET server_name = ? WHERE id = ?", (server_name, session_id))
     conn.commit()
     conn.close()
 
@@ -1187,7 +1229,7 @@ class ChatApp(tk.Tk):
         RECENT_DBS = RECENT_DBS[:5]
         save_recent_dbs(RECENT_DBS)
 
-        WINDOW_GEOMETRIES[old_path] = self.geometry()
+        WINDOW_GEOMETRIES[old_path] = self.get_window_state()
         save_window_geometries(WINDOW_GEOMETRIES)
 
         # Close any active RAG database before restarting
@@ -1220,7 +1262,7 @@ class ChatApp(tk.Tk):
         # Ensure any RAG-related resources are released
         if hasattr(self, "rag_manager"):
             self.rag_manager.close()
-        WINDOW_GEOMETRIES[DB_PATH] = self.geometry()
+        WINDOW_GEOMETRIES[DB_PATH] = self.get_window_state()
         save_window_geometries(WINDOW_GEOMETRIES)
         self.destroy()
         sys.exit(0)
@@ -1229,6 +1271,7 @@ class ChatApp(tk.Tk):
         if self.session_id:
             selected_model = self.model_var.get()
             update_session_model(self.session_id, selected_model)
+        self.refresh_last_model_label()
 
     def refresh_model_dropdown(self, initial=False, preferred_model=None):
         models = get_available_models(self.current_server_config)
@@ -1257,6 +1300,10 @@ class ChatApp(tk.Tk):
 
             if target_model:
                 self.model_var.set(target_model)
+
+        resolved = self.model_var.get()
+        self.refresh_last_model_label()
+        return resolved
 
         if self.session_id:
             update_session_model(self.session_id, self.model_var.get())
@@ -1297,12 +1344,32 @@ class ChatApp(tk.Tk):
         selected_name = self.server_var.get()
         server = self.server_manager.get_server(selected_name)
         if not server:
+            self.current_server_config = None
+            set_current_server_config(None)
+            if self.session_id:
+                update_session_server(self.session_id, None)
+            messagebox.showerror("Server Unavailable", f"The server '{selected_name}' is not available.", parent=self)
             return
+
         self.current_server_config = server
         self.server_manager.set_active_server(selected_name)
         set_current_server_config(server)
-        self.refresh_model_dropdown(initial=False)
-        self.show_status_message(f"Switched to server: {selected_name}")
+
+        if self.session_id:
+            update_session_server(self.session_id, selected_name)
+
+        preferred_model = getattr(self, "_pending_preferred_model", None)
+        self._pending_preferred_model = None
+        resolved_model = self.refresh_model_dropdown(initial=False, preferred_model=preferred_model)
+
+        if self.session_id and resolved_model:
+            update_session_model(self.session_id, resolved_model)
+
+        suppress_status = getattr(self, "_suppress_server_status_message", False)
+        self._suppress_server_status_message = False
+        if not suppress_status:
+            self.show_status_message(f"Switched to server: {selected_name}")
+        self.refresh_last_model_label()
 
     def add_server(self):
         dialog = ServerConfigDialog(self, "Add Server")
@@ -1367,36 +1434,81 @@ class ChatApp(tk.Tk):
             self.session_tooltip.hidetip()
 
     def on_button_press(self, event):
-        self.drag_item = self.session_tree.identify_row(event.y)
-        if self.drag_item:
-            self.session_tree.item(self.drag_item, tags="drag_item")
+        item = self.session_tree.identify_row(event.y)
+        self.drag_item = item
+        if not item:
+            return
+
+        values = self.session_tree.item(item, "values")
+        item_type = values[1] if values else None
+
+        current_selection = set(self.session_tree.selection())
+        shift_pressed = bool(event.state & 0x0001)
+        ctrl_pressed = bool(event.state & 0x0004)
+
+        if item in current_selection and not shift_pressed and not ctrl_pressed:
+            self.session_tree.item(item, tags="drag_item")
+            if item_type != 'folder':
+                return "break"
+            return None
+
+        if item not in current_selection and not shift_pressed and not ctrl_pressed:
+            self.session_tree.selection_set(item)
+            current_selection = {item}
+        self.session_tree.item(item, tags="drag_item")
+        if not shift_pressed and not ctrl_pressed:
+            if len(current_selection) > 1 or item_type != 'folder':
+                return "break"
 
     def on_button_release(self, event):
         if not self.drag_item:
             return
+        if not self.session_tree.exists(self.drag_item):
+            self.drag_item = None
+            return
             
         item_under_mouse = self.session_tree.identify_row(event.y)
         
+        selected_items = [item for item in self.session_tree.selection() if self.session_tree.item(item, "values")]
+
         if item_under_mouse and item_under_mouse != self.drag_item:
-            if self.session_tree.item(item_under_mouse, "values")[1] == 'folder':
-                # Dropped onto a folder
-                self.session_tree.move(self.drag_item, item_under_mouse, 'end')
-                drag_id = self.session_tree.item(self.drag_item, "values")[0]
-                target_id = self.session_tree.item(item_under_mouse, "values")[0]
-                self.update_item_parent(drag_id, target_id)
+            target_values = self.session_tree.item(item_under_mouse, "values")
+            if target_values and target_values[1] == 'folder':
+                target_id = target_values[0]
+                target_name = self.session_tree.item(item_under_mouse, "text")
+                moved = 0
+                for item in selected_items:
+                    if item == item_under_mouse:
+                        continue
+                    values = self.session_tree.item(item, "values")
+                    if not values or values[1] != 'chat':
+                        continue
+                    self.session_tree.move(item, item_under_mouse, 'end')
+                    self.update_item_parent(values[0], target_id)
+                    moved += 1
+                if moved:
+                    self.show_status_message(f"Moved {moved} chat(s) to '{target_name}'.")
             else:
                 # Dropped between items
-                parent = self.session_tree.parent(item_under_mouse)
-                index = self.session_tree.index(item_under_mouse)
-                self.session_tree.move(self.drag_item, parent, index)
-                drag_id = self.session_tree.item(self.drag_item, "values")[0]
-                parent_id = self.session_tree.item(parent, "values")[0] if parent else None
-                self.update_item_parent(drag_id, parent_id)
+                if len(selected_items) == 1 and self.drag_item:
+                    parent = self.session_tree.parent(item_under_mouse)
+                    index = self.session_tree.index(item_under_mouse)
+                    self.session_tree.move(self.drag_item, parent, index)
+                    drag_id = self.session_tree.item(self.drag_item, "values")[0]
+                    parent_id = self.session_tree.item(parent, "values")[0] if parent else None
+                    self.update_item_parent(drag_id, parent_id)
         elif not item_under_mouse:
             # Dropped in empty space, move to root
-            self.session_tree.move(self.drag_item, "", "end")
-            drag_id = self.session_tree.item(self.drag_item, "values")[0]
-            self.update_item_parent(drag_id, None)
+            moved = 0
+            for item in selected_items:
+                values = self.session_tree.item(item, "values")
+                if not values:
+                    continue
+                self.session_tree.move(item, "", "end")
+                self.update_item_parent(values[0], None)
+                moved += 1
+            if moved:
+                self.show_status_message(f"Moved {moved} chat(s) to root.")
 
         self.clear_drop_indicator()
         if self.drag_item:
@@ -1486,19 +1598,38 @@ class ChatApp(tk.Tk):
             self.whitespace_context_menu.post(event.x_root, event.y_root)
             return
 
-        self.session_tree.selection_set(item)
+        current_selection = set(self.session_tree.selection())
+        if item not in current_selection:
+            self.session_tree.selection_set(item)
+            current_selection = {item}
         item_type = self.session_tree.item(item, "values")[1]
+        selection_types = {self.session_tree.item(i, "values")[1] for i in current_selection if self.session_tree.item(i, "values")}
 
-        if item_type == 'folder':
+        multiple = len(current_selection) > 1
+
+        rag_enabled = getattr(self, "rag_enabled", True)
+
+        if 'folder' in selection_types:
             self.session_context_menu.entryconfig("New Chat", state="normal")
             self.session_context_menu.entryconfig("Auto Rename Chat", state="disabled")
             self.session_context_menu.entryconfig("Summarize and Start New Chat", state="disabled")
             self.session_context_menu.entryconfig("Copy Chat", state="disabled")
+            self.session_context_menu.entryconfig("Rename", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Manage Files", state="disabled")
+            self.session_context_menu.entryconfig("Export...", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Import Chat...", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Import Folder...", state="normal" if not multiple else "disabled")
         else:
             self.session_context_menu.entryconfig("New Chat", state="disabled")
-            self.session_context_menu.entryconfig("Auto Rename Chat", state="normal")
-            self.session_context_menu.entryconfig("Summarize and Start New Chat", state="normal")
-            self.session_context_menu.entryconfig("Copy Chat", state="normal")
+            self.session_context_menu.entryconfig("Auto Rename Chat", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Summarize and Start New Chat", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Copy Chat", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Rename", state="normal" if not multiple else "disabled")
+            manage_state = "normal" if (rag_enabled and not multiple) else "disabled"
+            self.session_context_menu.entryconfig("Manage Files", state=manage_state)
+            self.session_context_menu.entryconfig("Export...", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Import Chat...", state="normal" if not multiple else "disabled")
+            self.session_context_menu.entryconfig("Import Folder...", state="normal" if not multiple else "disabled")
 
         self.session_context_menu.post(event.x_root, event.y_root)
 
@@ -1523,7 +1654,7 @@ class ChatApp(tk.Tk):
         session_id = int(session_id)
         old_name = self.session_tree.item(selected_item, "text")
 
-        new_name = tk.simpledialog.askstring("Rename", "Enter new name:", initialvalue=old_name)
+        new_name = self._prompt_at_cursor("Rename", "Enter new name:", initial=old_name)
         if new_name and new_name != old_name:
             update_session_name(session_id, new_name)
             self.session_tree.item(selected_item, text=new_name)
@@ -1533,34 +1664,11 @@ class ChatApp(tk.Tk):
                 self.title(f"{APP_NAME} - {self.session_name}")
 
     def delete_session(self):
-        selection = self.session_tree.selection()
+        selection = tuple(self.session_tree.selection())
         if not selection:
             return
 
-        selected_item = selection[0]
-        session_id, type = self.session_tree.item(selected_item, "values")
-        session_id = int(session_id)
-        session_name = self.session_tree.item(selected_item, "text")
-
-        if type == 'folder':
-            # Simple folder deletion: only if it's empty
-            if not self.session_tree.get_children(selected_item):
-                if messagebox.askyesno("Delete Folder", f"Are you sure you want to delete the empty folder '{session_name}'?"):
-                    delete_session_and_messages(session_id)
-                    self.session_tree.delete(selected_item)
-            else:
-                messagebox.showinfo("Delete Folder", "Cannot delete a folder that is not empty.")
-            return
-
-        messages = get_messages(session_id)
-        
-        do_delete = False
-        if not messages: # If the session is empty, delete without confirmation
-            do_delete = True
-        elif messagebox.askyesno("Delete Session", f"Are you sure you want to delete session '{session_name}' and all its messages?"):
-            do_delete = True
-
-        if do_delete:
+        def remove_chat(session_id):
             if rag_functions:
                 try:
                     files_to_delete = rag_functions['get_files_for_chat'](session_id)
@@ -1572,15 +1680,154 @@ class ChatApp(tk.Tk):
                     self.show_status_message(f"Error deleting RAG files: {e}")
 
             delete_session_and_messages(session_id)
-            self.session_tree.delete(selected_item)
-
             if self.session_id == session_id:
                 self.session_id = None
                 self.session_name = None
+                self.last_model_used = None
                 self.chat_history.configure(state="normal")
                 self.chat_history.delete("1.0", tk.END)
                 self.chat_history.configure(state="normal")
                 self.update_input_widgets_state()
+                self.refresh_last_model_label()
+
+        chats = []
+        folders = []
+        for item in selection:
+            values = self.session_tree.item(item, "values")
+            if not values:
+                continue
+            session_id, item_type = values
+            session_id = int(session_id)
+            name = self.session_tree.item(item, "text")
+            if item_type == 'folder':
+                folders.append((item, session_id, name))
+            else:
+                chats.append((item, session_id, name))
+
+        if chats and folders:
+            messagebox.showinfo("Delete Items", "Please delete folders and chats separately.")
+            return
+
+        if folders:
+            session_map, children_map = self._get_session_maps()
+            selected_folder_ids = {session_id for _, session_id, _ in folders}
+
+            def has_selected_ancestor(folder_id):
+                record = session_map.get(folder_id)
+                if not record:
+                    return False
+                parent = record[7]
+                while parent is not None:
+                    try:
+                        parent_id = int(parent)
+                    except (TypeError, ValueError):
+                        break
+                    if parent_id in selected_folder_ids:
+                        return True
+                    parent_record = session_map.get(parent_id)
+                    if not parent_record:
+                        break
+                    parent = parent_record[7]
+                return False
+
+            pruned_folders = []
+            for entry in folders:
+                item, session_id, name = entry
+                if has_selected_ancestor(session_id):
+                    continue
+                pruned_folders.append(entry)
+
+            if not pruned_folders:
+                return
+
+            folder_infos = []
+            total_chat_count = 0
+            total_subfolder_count = 0
+
+            for item, session_id, name in pruned_folders:
+                descendants = self._collect_descendant_ids(session_id, children_map)
+                chat_ids = [sid for sid in descendants if session_map.get(sid, (None,) * 9)[8] == 'chat']
+                subfolder_ids = [sid for sid in descendants if session_map.get(sid, (None,) * 9)[8] == 'folder']
+                folder_infos.append({
+                    "item": item,
+                    "session_id": session_id,
+                    "name": name,
+                    "descendants": descendants,
+                    "chat_ids": chat_ids,
+                    "subfolder_ids": subfolder_ids
+                })
+                total_chat_count += len(chat_ids)
+                total_subfolder_count += len(subfolder_ids)
+
+            if len(folder_infos) == 1:
+                info = folder_infos[0]
+                chat_count = len(info["chat_ids"])
+                subfolder_count = len(info["subfolder_ids"])
+                if subfolder_count:
+                    prompt = (
+                        f"Are you sure you want to delete folder '{info['name']}' "
+                        f"and its {chat_count} chat(s) plus {subfolder_count} subfolder(s)?"
+                    )
+                else:
+                    prompt = (
+                        f"Are you sure you want to delete folder '{info['name']}' "
+                        f"and its {chat_count} chat(s)?"
+                    )
+            else:
+                prompt = (
+                    f"Are you sure you want to delete {len(folder_infos)} folder(s) "
+                    f"and all {total_chat_count} chat(s) contained within?"
+                )
+                if total_subfolder_count:
+                    prompt += f" This includes {total_subfolder_count} nested subfolder(s)."
+
+            if not prompt.endswith("?"):
+                prompt = prompt.strip() + "?"
+
+            if not self._confirm_at_cursor("Delete Folders", prompt):
+                return
+
+            processed_ids = set()
+            for info in folder_infos:
+                descendants = list(reversed(info["descendants"]))
+                for desc_id in descendants:
+                    if desc_id in processed_ids:
+                        continue
+                    record = session_map.get(desc_id)
+                    if not record:
+                        continue
+                    if record[8] == 'chat':
+                        remove_chat(desc_id)
+                    else:
+                        delete_session_and_messages(desc_id)
+                    processed_ids.add(desc_id)
+
+                if info["session_id"] not in processed_ids:
+                    delete_session_and_messages(info["session_id"])
+                    processed_ids.add(info["session_id"])
+
+                if self.session_tree.exists(info["item"]):
+                    self.session_tree.delete(info["item"])
+
+            self.show_status_message(
+                f"Deleted {len(folder_infos)} folder(s) and {total_chat_count} chat(s)."
+            )
+            return
+
+        if chats:
+            count = len(chats)
+            if count == 1:
+                prompt = f"Are you sure you want to delete session '{chats[0][2]}' and all its messages?"
+            else:
+                prompt = f"Are you sure you want to delete these {count} chats and all their messages?"
+            if not self._confirm_at_cursor("Delete Chats", prompt):
+                return
+
+            for item, session_id, _ in chats:
+                remove_chat(session_id)
+                self.session_tree.delete(item)
+
+            self.show_status_message(f"Deleted {count} chat(s).")
 
     def build_gui(self):
         self.grid_rowconfigure(0, weight=1)
@@ -1668,10 +1915,11 @@ class ChatApp(tk.Tk):
 
         self.session_tree = ttk.Treeview(self.left_frame, show="tree")
         self.session_tree.grid(row=6, column=0, sticky="nsew", padx=10, pady=10)
+        self.session_tree.configure(selectmode="extended")
         self.session_tree.bind('<<TreeviewSelect>>', self.select_session)
         self.session_tree.bind('<Button-3>', self.show_session_context_menu)
         self.session_tree.bind("<B1-Motion>", self.move_item)
-        self.session_tree.bind("<ButtonPress-1>", self.on_button_press)
+        self.session_tree.bind("<ButtonPress-1>", self.on_button_press, add="+")
         self.session_tree.bind("<ButtonRelease-1>", self.on_button_release)
         self.session_tree.bind("<F2>", lambda e: self.rename_session())
 
@@ -1692,10 +1940,18 @@ class ChatApp(tk.Tk):
         self.session_context_menu.add_command(label="Auto Rename Chat", command=self.auto_rename_selected_session)
         self.session_context_menu.add_command(label="Summarize and Start New Chat", command=self.summarize_and_start_new_chat)
         self.session_context_menu.add_command(label="Copy Chat", command=self.copy_selected_session)
+        self.session_context_menu.add_command(label="Manage Files", command=self.manage_files_for_selection)
+        self.session_context_menu.add_separator()
+        self.session_context_menu.add_command(label="Export...", command=self.export_selected_item)
+        self.session_context_menu.add_command(label="Import Chat...", command=self.import_chat_from_context)
+        self.session_context_menu.add_command(label="Import Folder...", command=self.import_folder_from_context)
 
         self.whitespace_context_menu = tk.Menu(self.session_tree, tearoff=0)
         self.whitespace_context_menu.add_command(label="New Chat", command=lambda: self.new_session(parent_id=None))
         self.whitespace_context_menu.add_command(label="New Folder", command=lambda: self.new_folder(parent_id=None))
+        self.whitespace_context_menu.add_separator()
+        self.whitespace_context_menu.add_command(label="Import Chat...", command=lambda: self.import_chat(parent_id=None, expected_type="chat"))
+        self.whitespace_context_menu.add_command(label="Import Folder...", command=lambda: self.import_chat(parent_id=None, expected_type="folder"))
 
         self.context_menus.extend([
             self.session_context_menu,
@@ -1703,16 +1959,10 @@ class ChatApp(tk.Tk):
         ])
 
         self.new_button = ttk.Button(self.left_frame, text="+ New", command=self.new_session)
-        self.new_button.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 2))
-
-        self.export_button = ttk.Button(self.left_frame, text="Export Chat", command=self.export_chat)
-        self.export_button.grid(row=8, column=0, sticky="ew", padx=10, pady=2)
-
-        self.import_button = ttk.Button(self.left_frame, text="Import Chat", command=self.import_chat)
-        self.import_button.grid(row=9, column=0, sticky="ew", padx=10, pady=2)
+        self.new_button.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 10))
 
         self.settings_button = ttk.Button(self.left_frame, text="Settings", command=self.open_settings)
-        self.settings_button.grid(row=10, column=0, sticky="ew", padx=10, pady=(2, 10))
+        self.settings_button.grid(row=8, column=0, sticky="ew", padx=10, pady=(0, 10))
 
         # --- Main Chat Area ---
         self.main_frame = ttk.Frame(self.left_paned_window)
@@ -1916,6 +2166,33 @@ class ChatApp(tk.Tk):
         self.status_bar = ttk.Label(self, text="", anchor=tk.W)
         self.status_bar.grid(row=1, column=0, sticky="ew")
 
+    def apply_sash_position(self, sash_pos):
+        if not hasattr(self, "main_paned_window"):
+            return
+        try:
+            self.main_paned_window.sashpos(0, int(sash_pos))
+        except Exception:
+            pass
+
+    def apply_default_sash(self, fraction=0.85):
+        if not hasattr(self, "main_paned_window"):
+            return
+        total_width = self.main_paned_window.winfo_width()
+        if total_width <= 1:
+            self.after(100, self.apply_default_sash, fraction)
+            return
+        sash_pos = int(total_width * fraction)
+        self.apply_sash_position(sash_pos)
+
+    def get_window_state(self):
+        state = {"geometry": self.geometry()}
+        if hasattr(self, "main_paned_window"):
+            try:
+                state["sash"] = int(self.main_paned_window.sashpos(0))
+            except Exception:
+                pass
+        return state
+
     def load_system_prompts_to_dropdown(self):
         self.system_prompts = get_system_prompts()
         prompt_titles = [p[1] for p in self.system_prompts]
@@ -2005,8 +2282,6 @@ class ChatApp(tk.Tk):
             self.model_label.configure(style="Dark.TLabel")
             self.session_tree.configure(style="Dark.Treeview")
             self.new_button.configure(style="Dark.TButton")
-            self.export_button.configure(style="Dark.TButton")
-            self.import_button.configure(style="Dark.TButton")
             self.settings_button.configure(style="Dark.TButton")
             # Main chat area
             self.main_frame.configure(style="Dark.TFrame")
@@ -2042,8 +2317,6 @@ class ChatApp(tk.Tk):
             self.model_label.configure(style="TLabel")
             self.session_tree.configure(style="Treeview")
             self.new_button.configure(style="TButton")
-            self.export_button.configure(style="TButton")
-            self.import_button.configure(style="TButton")
             self.settings_button.configure(style="TButton")
             # Main chat area
             self.main_frame.configure(style="TFrame")
@@ -2237,117 +2510,392 @@ class ChatApp(tk.Tk):
             messagebox.showinfo("Restart Required", "Please restart the application for the RAG setting to take effect.", parent=settings_win)
         ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=19, column=0, sticky="w", padx=20)
 
-    def export_chat(self):
-        if not self.session_id:
-            messagebox.showinfo("Export Chat", "No session selected to export.")
+    def export_chat(self, session_id=None, default_name=None):
+        session_id = session_id or self.session_id
+        if not session_id:
+            messagebox.showinfo("Export Chat", "No chat selected to export.")
             return
 
-        messages = get_messages(self.session_id)
-        
-        # Get the current session's details
-        current_session_info = None
-        for _id, name, model, last_model_used, system_prompt, sp_id, parent_id, type in get_sessions():
-            if _id == self.session_id:
-                current_session_info = {
-                    "model": model,
-                    "messages": messages,
-                    "system_prompt": system_prompt,
-                    "last_model_used": last_model_used or model
-                }
-                break
-        
-        if not current_session_info:
-            messagebox.showerror("Export Error", "Could not retrieve current session details.")
+        session_map, children_map = self._get_session_maps()
+        record = session_map.get(session_id)
+        if not record or record[8] != 'chat':
+            messagebox.showerror("Export Error", "The selected item is not a chat.")
             return
 
+        data = self._serialize_session_structure(session_id, session_map, children_map)
+        if not data:
+            messagebox.showerror("Export Error", "Unable to serialize the selected chat.")
+            return
+
+        session_name = default_name or record[1]
+        initialfile = self._sanitize_filename(f"{session_name}_chat.json")
         file_path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.* ")],
-            initialfile=f"{self.session_name.replace(' ', '_')}_chat.json"
+            initialfile=initialfile
         )
 
         if file_path:
             try:
-                with open(file_path, 'w') as f:
-                    json.dump(current_session_info, f, indent=4)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
                 messagebox.showinfo("Export Chat", "Chat exported successfully!")
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to export chat: {e}")
 
-    def import_chat(self):
-        file_path = filedialog.askopenfilename(
-            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")]
+    def export_folder(self, folder_id, folder_name):
+        session_map, children_map = self._get_session_maps()
+        record = session_map.get(folder_id)
+        if not record or record[8] != 'folder':
+            messagebox.showerror("Export Error", "The selected item is not a folder.")
+            return
+
+        data = self._serialize_session_structure(folder_id, session_map, children_map)
+        if not data:
+            messagebox.showerror("Export Error", "Unable to serialize the selected folder.")
+            return
+
+        initialfile = self._sanitize_filename(f"{folder_name}_folder.json")
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")],
+            initialfile=initialfile
         )
 
         if file_path:
             try:
-                with open(file_path, 'r') as f:
-                    imported_data = json.load(f)
-
-                imported_model = "gpt-3.5-turbo"
-                imported_messages = []
-                imported_system_prompt = ""
-                imported_last_model = imported_model
-
-                if isinstance(imported_data, dict) and "messages" in imported_data:
-                    imported_model = imported_data.get("model", "gpt-3.5-turbo")
-                    imported_last_model = imported_data.get("last_model_used", imported_model)
-                    imported_messages = imported_data["messages"]
-                    imported_system_prompt = imported_data.get("system_prompt", "")
-                elif isinstance(imported_data, list):
-                    imported_messages = imported_data
-                else:
-                    raise ValueError("Invalid JSON format. Expected a list of messages or a dictionary with 'model' and 'messages'.")
-
-                default_name = os.path.splitext(os.path.basename(file_path))[0]
-                new_session_name = tk.simpledialog.askstring(
-                    "Import Chat",
-                    "Enter a name for the new session:",
-                    initialvalue=default_name
-                )
-                
-                if not new_session_name:
-                    return
-
-                parent_id = None
-                selection = self.session_tree.selection()
-                if selection:
-                    selected_item = selection[0]
-                    item_type = self.session_tree.item(selected_item, "values")[1]
-                    if item_type == 'folder':
-                        parent_id = self.session_tree.item(selected_item, "values")[0]
-
-                session_id = create_session(
-                    new_session_name,
-                    imported_model,
-                    imported_system_prompt,
-                    parent_id=parent_id,
-                    last_model_used=imported_last_model
-                )
-                for role, content in imported_messages:
-                    save_message(session_id, role, content)
-
-                self.load_sessions()
-                
-                new_item = self.find_tree_item_by_id(session_id)
-                if new_item:
-                    self.session_tree.selection_set(new_item)
-                    self.session_tree.focus(new_item)
-                    self.select_session(None)
-
-                if imported_model in get_available_models(self.current_server_config):
-                    self.model_var.set(imported_model)
-                else:
-                    self.model_var.set("gpt-3.5-turbo")
-
-                messagebox.showinfo("Import Chat", "Chat imported successfully!")
-
-            except json.JSONDecodeError:
-                messagebox.showerror("Import Error", "Invalid JSON file.")
-            except ValueError as e:
-                messagebox.showerror("Import Error", f"Error importing chat: {e}")
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+                messagebox.showinfo("Export Folder", "Folder exported successfully!")
             except Exception as e:
-                messagebox.showerror("Import Error", f"An unexpected error occurred: {e}")
+                messagebox.showerror("Export Error", f"Failed to export folder: {e}")
+
+    def export_selected_item(self):
+        selection = self.session_tree.selection()
+        if not selection:
+            messagebox.showinfo("Export", "Select a chat or folder to export.")
+            return
+
+        selected_item = selection[0]
+        values = self.session_tree.item(selected_item, "values")
+        if not values:
+            messagebox.showinfo("Export", "No exportable item selected.")
+            return
+
+        session_id_str, item_type = values
+        session_name = self.session_tree.item(selected_item, "text") or "Session"
+        try:
+            session_id = int(session_id_str)
+        except (TypeError, ValueError):
+            messagebox.showerror("Export Error", "Invalid selection.")
+            return
+
+        if item_type == 'folder':
+            self.export_folder(session_id, session_name)
+        else:
+            self.export_chat(session_id=session_id, default_name=session_name)
+
+    def import_chat_from_context(self):
+        parent_id = self._determine_import_parent()
+        self.import_chat(parent_id=parent_id, expected_type="chat")
+
+    def import_folder_from_context(self):
+        parent_id = self._determine_import_parent()
+        self.import_chat(parent_id=parent_id, expected_type="folder")
+
+    def import_chat(self, parent_id=None, expected_type="chat"):
+        parent_id = self._coerce_parent_id(parent_id)
+        if parent_id is None:
+            parent_id = self._determine_import_parent()
+
+        file_path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.* ")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                imported_data = json.load(f)
+        except json.JSONDecodeError:
+            messagebox.showerror("Import Error", "Invalid JSON file.")
+            return
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to read file: {e}")
+            return
+
+        import_type = self._detect_import_type(imported_data)
+        if expected_type == "chat" and import_type == "folder":
+            messagebox.showerror("Import Error", "Selected file contains a folder export. Use 'Import Folder...' instead.")
+            return
+        if expected_type == "folder" and import_type != "folder":
+            messagebox.showerror("Import Error", "Selected file does not contain a folder export.")
+            return
+
+        default_name = os.path.splitext(os.path.basename(file_path))[0]
+        override_name = None
+
+        if import_type == "chat":
+            existing_name = imported_data.get("name") if isinstance(imported_data, dict) else None
+            prompt_name = existing_name or default_name or "Imported Chat"
+            new_session_name = tk.simpledialog.askstring(
+                "Import Chat",
+                "Enter a name for the imported chat:",
+                initialvalue=prompt_name
+            )
+            if not new_session_name:
+                return
+            override_name = new_session_name
+        else:
+            existing_name = imported_data.get("name") if isinstance(imported_data, dict) else None
+            prompt_name = existing_name or default_name or "Imported Folder"
+            new_folder_name = tk.simpledialog.askstring(
+                "Import Folder",
+                "Enter a name for the imported folder:",
+                initialvalue=prompt_name
+            )
+            if not new_folder_name:
+                return
+            override_name = new_folder_name
+
+        try:
+            created_ids = self._import_session_data(
+                imported_data,
+                parent_id=parent_id,
+                default_name=default_name,
+                override_name=override_name
+            )
+        except ValueError as e:
+            messagebox.showerror("Import Error", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Import Error", f"An unexpected error occurred: {e}")
+            return
+
+        if not created_ids:
+            messagebox.showerror("Import Error", "Nothing was imported from the selected file.")
+            return
+
+        self.load_sessions()
+
+        root_id = created_ids[0]
+        new_item = self.find_tree_item_by_id(root_id)
+        if new_item:
+            self.session_tree.selection_set(new_item)
+            self.session_tree.focus(new_item)
+            self.session_tree.see(new_item)
+            self.select_session(None)
+
+        if import_type == "folder":
+            messagebox.showinfo("Import Folder", "Folder imported successfully!")
+        else:
+            messagebox.showinfo("Import Chat", "Chat imported successfully!")
+
+    def _coerce_parent_id(self, parent_id):
+        if parent_id in (None, "", False):
+            return None
+        try:
+            return int(parent_id)
+        except (TypeError, ValueError):
+            return None
+
+    def _detect_import_type(self, data):
+        if isinstance(data, dict) and data.get("type") == "folder":
+            return "folder"
+        return "chat"
+
+    def _determine_import_parent(self):
+        selection = self.session_tree.selection()
+        if not selection:
+            return None
+
+        selected_item = selection[0]
+        values = self.session_tree.item(selected_item, "values")
+        if not values:
+            return None
+
+        session_id_str, item_type = values
+        try:
+            session_id = int(session_id_str)
+        except (TypeError, ValueError):
+            return None
+
+        if item_type == 'folder':
+            return session_id
+
+        record = self._get_session_record(session_id)
+        if record:
+            parent_id = record[7]
+            return int(parent_id) if parent_id is not None else None
+        return None
+
+    def _sanitize_filename(self, name):
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "")
+        safe = safe.strip("._")
+        return safe or "session"
+
+    def _get_session_maps(self):
+        session_map = {}
+        children_map = {}
+        for record in get_sessions():
+            session_id = record[0]
+            try:
+                session_id = int(session_id)
+            except (TypeError, ValueError):
+                pass
+
+            session_map[session_id] = record
+
+            parent = record[7]
+            if isinstance(parent, str):
+                parent_stripped = parent.strip()
+                if parent_stripped.lower() in ("", "none", "null", "nil"):
+                    parent = None
+                else:
+                    try:
+                        parent = int(parent_stripped)
+                    except ValueError:
+                        parent = None
+            elif parent is not None:
+                try:
+                    parent = int(parent)
+                except (TypeError, ValueError):
+                    parent = None
+
+            children_map.setdefault(parent, []).append(record)
+        return session_map, children_map
+
+    def _collect_descendant_ids(self, session_id, children_map):
+        try:
+            root_id = int(session_id)
+        except (TypeError, ValueError):
+            root_id = session_id
+
+        descendants = []
+        visited = set()
+        stack = [root_id]
+        while stack:
+            current = stack.pop()
+            for child_record in children_map.get(current, []):
+                raw_child_id = child_record[0]
+                try:
+                    child_id = int(raw_child_id)
+                except (TypeError, ValueError):
+                    child_id = raw_child_id
+                if child_id in visited:
+                    continue
+                visited.add(child_id)
+                descendants.append(child_id)
+                stack.append(child_id)
+        return descendants
+
+    def _serialize_session_structure(self, session_id, session_map, children_map):
+        lookup_id = session_id
+        if isinstance(lookup_id, str):
+            try:
+                lookup_id = int(lookup_id.strip())
+            except ValueError:
+                pass
+        record = session_map.get(lookup_id)
+        if not record:
+            return None
+
+        raw_id = record[0]
+        try:
+            record_id = int(raw_id)
+        except (TypeError, ValueError):
+            record_id = raw_id
+
+        _id, name, model, server_name, last_model_used, system_prompt, sp_id, parent_id, item_type = record
+        if item_type == 'folder':
+            children_serialized = []
+            for child_record in children_map.get(record_id, []):
+                child_data = self._serialize_session_structure(child_record[0], session_map, children_map)
+                if child_data:
+                    children_serialized.append(child_data)
+            return {
+                "type": "folder",
+                "name": name,
+                "children": children_serialized
+            }
+
+        messages_payload = []
+        for role, content in get_messages(record_id):
+            messages_payload.append({"role": role, "content": content})
+
+        return {
+            "type": "chat",
+            "name": name,
+            "model": model,
+            "server": server_name,
+            "system_prompt": system_prompt,
+            "system_prompt_id": sp_id,
+            "last_model_used": (last_model_used or model),
+            "messages": messages_payload
+        }
+
+    def _import_session_data(self, data, parent_id=None, default_name=None, override_name=None):
+        created_ids = []
+        if isinstance(data, dict) and data.get("type") == "folder":
+            folder_name = override_name or data.get("name") or default_name or "Imported Folder"
+            folder_id = create_session(
+                folder_name,
+                model='gpt-3.5-turbo',
+                type='folder',
+                parent_id=parent_id,
+                last_model_used='gpt-3.5-turbo'
+            )
+            created_ids.append(folder_id)
+            for child in data.get("children", []):
+                created_ids.extend(self._import_session_data(child, parent_id=folder_id))
+            return created_ids
+
+        if isinstance(data, dict):
+            messages_data = data.get("messages", [])
+            model = data.get("model", "gpt-3.5-turbo")
+            last_model = data.get("last_model_used", model)
+            system_prompt = data.get("system_prompt", "")
+            system_prompt_id = data.get("system_prompt_id")
+            server = data.get("server") or self.server_var.get()
+            session_name = override_name or data.get("name") or default_name or "Imported Chat"
+        elif isinstance(data, list):
+            messages_data = data
+            model = "gpt-3.5-turbo"
+            last_model = model
+            system_prompt = ""
+            system_prompt_id = None
+            server = self.server_var.get()
+            session_name = override_name or default_name or "Imported Chat"
+        else:
+            raise ValueError("Unsupported chat format in import data.")
+
+        processed_messages = []
+        for msg in messages_data:
+            if isinstance(msg, dict):
+                role = msg.get("role")
+                content = msg.get("content")
+            elif isinstance(msg, (list, tuple)) and len(msg) >= 2:
+                role, content = msg[0], msg[1]
+            else:
+                continue
+            if not role or content is None:
+                continue
+            processed_messages.append((role, content))
+
+        session_id = create_session(
+            session_name,
+            model,
+            system_prompt,
+            parent_id=parent_id,
+            system_prompt_id=system_prompt_id,
+            last_model_used=last_model,
+            server_name=server
+        )
+        for role, content in processed_messages:
+            save_message(session_id, role, content)
+        created_ids.append(session_id)
+        return created_ids
 
     def export_system_prompts(self):
         prompts = get_system_prompts()
@@ -2411,7 +2959,7 @@ class ChatApp(tk.Tk):
             messagebox.showerror("Import Error", f"Failed to import system prompts: {e}")
 
     def new_folder(self, parent_id=None):
-        name = tk.simpledialog.askstring("New Folder", "Enter folder name:")
+        name = self._prompt_at_cursor("New Folder", "Enter folder name:")
         if name:
             db_parent_id = int(parent_id) if parent_id is not None else None
             session_id = create_session(name, model='gpt-3.5-turbo', type='folder', parent_id=db_parent_id, last_model_used='gpt-3.5-turbo')
@@ -2431,7 +2979,7 @@ class ChatApp(tk.Tk):
         session_map = {s[0]: s for s in sessions}
 
         def add_to_tree(parent_id, parent_node=""):
-            for _id, name, model, last_model_used, system_prompt, sp_id, s_parent_id, type in sessions:
+            for _id, name, model, server_name, last_model_used, system_prompt, sp_id, s_parent_id, type in sessions:
                 if s_parent_id == parent_id:
                     icon = self.chat_icon if type == 'chat' else self.folder_icon
                     node = self.session_tree.insert(parent_node, "end", text=name, values=(str(_id), type), image=icon)
@@ -2468,14 +3016,77 @@ class ChatApp(tk.Tk):
             self.refresh_last_model_label()
             return
 
-        for sid, name, model, last_model_used, system_prompt, sp_id, parent_id, stype in get_sessions():
+        for sid, name, model, server_name, last_model_used, system_prompt, sp_id, parent_id, stype in get_sessions():
             if sid == _id:
                 self.session_name = name
                 self.session_id = _id
                 self.title(f"{APP_NAME} - {self.session_name}")
-                self.model_var.set(model)
                 self.last_model_used = last_model_used or model
-                
+
+                stored_server = server_name
+                desired_server = stored_server or self.server_var.get() or self.server_manager.get_active_server_name()
+                server_config = self.server_manager.get_server(desired_server) if desired_server else None
+
+                if stored_server and not server_config:
+                    messagebox.showerror(
+                        "Server Missing",
+                        f"The server '{stored_server}' configured for this chat is not available.",
+                        parent=self
+                    )
+                    fallback_name = self.server_manager.get_active_server_name()
+                    if fallback_name and fallback_name != stored_server:
+                        desired_server = fallback_name
+                        server_config = self.server_manager.get_server(fallback_name)
+                    else:
+                        desired_server = None
+
+                if not server_config:
+                    available_names = self.server_manager.list_server_names()
+                    if not available_names:
+                        messagebox.showerror(
+                            "No Servers",
+                            "No server configurations are available. Please add a server before continuing.",
+                            parent=self
+                        )
+                        self.server_var.set("")
+                        self.current_server_config = None
+                        set_current_server_config(None)
+                        self.model_dropdown['values'] = []
+                        effective_model = None
+                    else:
+                        # Fall back to the first available server
+                        desired_server = available_names[0]
+                        server_config = self.server_manager.get_server(desired_server)
+                        self._pending_preferred_model = model
+                        self._suppress_server_status_message = True
+                        self.server_var.set(desired_server)
+                        self.on_server_selected()
+                        effective_model = self.model_var.get()
+                else:
+                    if (self.server_var.get() != desired_server) or (self.current_server_config != server_config):
+                        self._pending_preferred_model = model
+                        self._suppress_server_status_message = True
+                        self.server_var.set(desired_server)
+                        self.on_server_selected()
+                    else:
+                        self.refresh_model_dropdown(initial=False, preferred_model=model)
+                        if desired_server:
+                            update_session_server(self.session_id, desired_server)
+                    effective_model = self.model_var.get()
+
+                if server_config:
+                    available_model = effective_model
+                    if model and available_model != model:
+                        messagebox.showerror(
+                            "Model Missing",
+                            f"The model '{model}' is not available on server '{desired_server}'.\n"
+                            f"Using '{available_model}' instead.",
+                            parent=self
+                        )
+                        update_session_model(self.session_id, available_model)
+                    elif not model and available_model:
+                        update_session_model(self.session_id, available_model)
+
                 # Load system prompt
                 self.system_prompt_text.delete("1.0", tk.END)
                 if system_prompt:
@@ -2507,7 +3118,7 @@ class ChatApp(tk.Tk):
             return
 
     def get_session_id_by_name(self, name):
-        for _id, s_name, model, last_model_used, system_prompt, sp_id, parent_id, type in get_sessions():
+        for _id, s_name, model, server_name, last_model_used, system_prompt, sp_id, parent_id, type in get_sessions():
             if s_name == name:
                 return _id
         return None
@@ -2562,7 +3173,8 @@ class ChatApp(tk.Tk):
             default_model,
             parent_id=db_parent_id,
             system_prompt_id=getattr(self, "current_system_prompt_id", None),
-            last_model_used=default_model
+            last_model_used=default_model,
+            server_name=self.server_var.get()
         )
         
         parent_node = self.find_tree_item_by_id(parent_id) if parent_id is not None else ""
@@ -2760,7 +3372,8 @@ class ChatApp(tk.Tk):
                 self.model_var.get(),
                 self.system_prompt_text.get("1.0", tk.END).strip(),
                 system_prompt_id=getattr(self, "current_system_prompt_id", None),
-                last_model_used=self.model_var.get()
+                last_model_used=self.model_var.get(),
+                server_name=self.server_var.get()
             )
             save_message(new_session_id, "user", f"Let's discuss the following:\n\n{selected_text}")
             self.load_sessions()
@@ -2864,12 +3477,90 @@ class ChatApp(tk.Tk):
                 return record
         return None
 
+    def _confirm_at_cursor(self, title, message):
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.configure(padx=10, pady=10)
+
+        x = self.winfo_pointerx()
+        y = self.winfo_pointery()
+        dialog.geometry(f"+{x}+{y}")
+
+        ttk.Label(dialog, text=message, wraplength=320, justify=tk.LEFT).pack(pady=(0, 10))
+
+        result = {"value": False}
+
+        def on_yes():
+            result["value"] = True
+            dialog.destroy()
+
+        def on_no():
+            dialog.destroy()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X)
+
+        yes_btn = ttk.Button(button_frame, text="Yes", command=on_yes)
+        yes_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        no_btn = ttk.Button(button_frame, text="No", command=on_no)
+        no_btn.pack(side=tk.LEFT)
+
+        dialog.bind("<Return>", lambda e: on_yes())
+        dialog.bind("<Escape>", lambda e: on_no())
+        yes_btn.focus_set()
+        self.wait_window(dialog)
+        return result["value"]
+
+    def _prompt_at_cursor(self, title, message, initial=""):
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.configure(padx=10, pady=10)
+
+        x = self.winfo_pointerx()
+        y = self.winfo_pointery()
+        dialog.geometry(f"+{x}+{y}")
+
+        ttk.Label(dialog, text=message, justify=tk.LEFT).pack(pady=(0, 8))
+
+        entry = ttk.Entry(dialog, width=30)
+        entry.insert(0, initial or "")
+        entry.pack(fill=tk.X)
+
+        result = {"value": None}
+
+        def on_ok():
+            result["value"] = entry.get().strip()
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=(8, 0))
+
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT)
+
+        dialog.bind("<Return>", lambda e: on_ok())
+        dialog.bind("<Escape>", lambda e: on_cancel())
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        self.wait_window(dialog)
+        return result["value"]
+
     def refresh_last_model_label(self):
         if hasattr(self, "last_model_label"):
-            if self.last_model_used:
-                self.last_model_label.configure(text=f"Last model used: {self.last_model_used}")
-            else:
-                self.last_model_label.configure(text="")
+            last = self.last_model_used or "Unknown"
+            current = self.model_var.get() if hasattr(self, "model_var") else ""
+            current = current or "Unknown"
+            self.last_model_label.configure(text=f"Last model used: {last}, Current model: {current}")
 
     def summarize_and_rename_session(self, force=False):
         if not self.session_id or not self.session_name:
@@ -2994,9 +3685,10 @@ class ChatApp(tk.Tk):
         model = summary_model
         last_model_used = summary_model
         if record:
-            _, _, model, _, system_prompt, sp_id, parent_id, _ = record
+            _, _, model, server_name, _, system_prompt, sp_id, parent_id, _ = record
         else:
             system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
+            server_name = self.server_var.get()
 
         new_session_id = create_session(
             new_title,
@@ -3004,7 +3696,8 @@ class ChatApp(tk.Tk):
             system_prompt,
             parent_id=parent_id,
             system_prompt_id=sp_id,
-            last_model_used=last_model_used
+            last_model_used=last_model_used,
+            server_name=server_name
         )
         save_message(new_session_id, "assistant", summary_text.strip())
         self.load_sessions()
@@ -3035,7 +3728,7 @@ class ChatApp(tk.Tk):
             self.show_status_message("Unable to load chat for copying", duration=3000)
             return
 
-        _, name, model, last_model_used, system_prompt, system_prompt_id, parent_id, _ = record
+        _, name, model, server_name, last_model_used, system_prompt, system_prompt_id, parent_id, _ = record
 
         conversation_messages = get_messages(session_id)
         new_name = f"{name} (Copy)"
@@ -3046,7 +3739,8 @@ class ChatApp(tk.Tk):
             system_prompt,
             parent_id=parent_id,
             system_prompt_id=system_prompt_id,
-            last_model_used=last_model_used or model
+            last_model_used=last_model_used or model,
+            server_name=server_name
         )
 
         for role, content in conversation_messages:
@@ -3062,19 +3756,50 @@ class ChatApp(tk.Tk):
 
         self.show_status_message(f"Copied chat to '{new_name}'", duration=4000)
 
+    def manage_files_for_selection(self):
+        self.close_all_menus()
+        selection = self.session_tree.selection()
+        if not selection:
+            return
+        selected_item = selection[0]
+        values = self.session_tree.item(selected_item, "values")
+        if not values or values[1] != 'chat':
+            return
+
+        session_id = int(values[0])
+        if self.session_id != session_id:
+            self.session_tree.selection_set(selected_item)
+            self.session_tree.focus(selected_item)
+            self.session_tree.event_generate('<<TreeviewSelect>>')
+
+        position = (self.winfo_pointerx(), self.winfo_pointery())
+        self.open_files_dialog(position=position)
+
     def close_files_dialog(self):
         if hasattr(self, 'files_window') and self.files_window.winfo_exists():
             self.files_window.grab_release()
             self.files_window.destroy()
 
-    def open_files_dialog(self):
+    def open_files_dialog(self, position=None):
+        width, height = 400, 300
+
+        def apply_geometry(pos):
+            if pos:
+                x = max(int(pos[0] - width / 2), 0)
+                y = max(int(pos[1] - height / 2), 0)
+                self.files_window.geometry(f"{width}x{height}+{x}+{y}")
+            else:
+                self.files_window.geometry(f"{width}x{height}")
+
         if hasattr(self, 'files_window') and self.files_window.winfo_exists():
+            if position:
+                apply_geometry(position)
             self.files_window.lift()
             return
 
         self.files_window = tk.Toplevel(self)
         self.files_window.title("Attached Files")
-        self.files_window.geometry("400x300")
+        apply_geometry(position)
 
         self.files_window.transient(self)
         self.files_window.grab_set()
@@ -3097,6 +3822,11 @@ class ChatApp(tk.Tk):
         add_button = ttk.Button(button_frame, text="Add Files", command=self.add_files_to_list)
         add_button.pack(side=tk.LEFT, padx=(0, 5))
 
+        add_url_button = ttk.Button(button_frame, text="Add URL", command=self.add_url_to_list)
+        add_url_button.pack(side=tk.LEFT, padx=(0, 5))
+        if not rag_functions:
+            add_url_button.configure(state="disabled")
+
         remove_button = ttk.Button(button_frame, text="Remove", command=self.remove_selected_file)
         remove_button.pack(side=tk.LEFT)
 
@@ -3117,6 +3847,83 @@ class ChatApp(tk.Tk):
                     self.chat_files.append(file_path)
                     self.process_new_chat_file(file_path)
             self.update_files_listbox()
+
+    def _normalize_url(self, url):
+        if not url:
+            return None
+        url = url.strip()
+        if not url:
+            return None
+        if not re.match(r'^https?://', url, re.IGNORECASE):
+            url = f"https://{url}"
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return url
+
+    def _format_url_display(self, url, suffix=True):
+        try:
+            parsed = urlparse(url)
+            if not parsed.netloc:
+                raise ValueError
+            display = parsed.netloc
+            if parsed.path and parsed.path != "/":
+                display += parsed.path
+            if parsed.query:
+                display += "?" + parsed.query
+        except Exception:
+            display = url
+        display = display.rstrip("/")
+        max_len = 50
+        if len(display) > max_len:
+            display = display[:max_len - 3] + "..."
+        return f"{display} (URL)" if suffix else display
+
+    def _format_file_display(self, entry):
+        if entry.startswith("http://") or entry.startswith("https://"):
+            return self._format_url_display(entry)
+        return os.path.basename(entry)
+
+    def add_url_to_list(self):
+        if not rag_functions:
+            messagebox.showinfo("RAG Disabled", "URL ingestion requires RAG. Enable RAG in settings first.", parent=self.files_window)
+            return
+        if not self.session_id:
+            messagebox.showinfo("No Chat Selected", "Please select a chat before attaching a URL.", parent=self.files_window)
+            return
+
+        raw_url = simpledialog.askstring("Add URL", "Enter the URL to attach:", parent=self.files_window)
+        normalized_url = self._normalize_url(raw_url)
+        if not normalized_url:
+            if raw_url and raw_url.strip():
+                messagebox.showerror("Invalid URL", "Please provide a valid URL (including domain).", parent=self.files_window)
+            return
+        url = normalized_url
+
+        if url in self.chat_files:
+            messagebox.showinfo("Duplicate URL", "This URL is already attached to the chat.", parent=self.files_window)
+            return
+
+        self.show_status_message(f"Fetching content from {url}...")
+        try:
+            text = fetch_url_text(url)
+        except Exception as e:
+            self.show_status_message(f"Failed to fetch {url}: {e}")
+            messagebox.showerror("Fetch Error", f"Failed to fetch content from the URL:\n{e}", parent=self.files_window)
+            return
+
+        try:
+            rag_functions['add_text_to_chat'](text, source=url, chat_id=self.session_id)
+            save_message(self.session_id, "assistant", f"Retrieved and stored content from {url}")
+        except Exception as e:
+            self.show_status_message(f"Failed to embed URL content: {e}")
+            messagebox.showerror("RAG Error", f"Failed to store URL content:\n{e}", parent=self.files_window)
+            return
+
+        self.chat_files.append(url)
+        self.update_files_listbox()
+        self.load_chat_history()
+        self.show_status_message(f"URL added: {self._format_url_display(url, suffix=False)}")
 
     def remove_selected_file(self):
         selection = self.files_listbox.curselection()
@@ -3146,19 +3953,13 @@ class ChatApp(tk.Tk):
             return
         self.files_listbox.delete(0, tk.END)
         for file_path in self.chat_files:
-            if file_path.startswith("http://") or file_path.startswith("https://"):
-                display = f"URL:{file_path}"
-            else:
-                display = os.path.basename(file_path)
+            display = self._format_file_display(file_path)
             self.files_listbox.insert(tk.END, display)
 
     def update_files_listbox2(self):
         self.files_listbox.delete(0, tk.END)
         for file_path in self.chat_files:
-            if file_path.startswith("http://") or file_path.startswith("https://"):
-                display = f"URL:{file_path}"
-            else:
-                display = os.path.basename(file_path)
+            display = self._format_file_display(file_path)
             self.files_listbox.insert(tk.END, display)
 
     def create_files_listbox_tooltip(self):
@@ -3225,6 +4026,25 @@ class ChatApp(tk.Tk):
         self.history_index = len(self.message_history)
         self.current_input_buffer = ""
 
+        selected_server_name = self.server_var.get()
+        server_config = self.server_manager.get_server(selected_server_name) if selected_server_name else None
+        if not server_config:
+            messagebox.showerror(
+                "Server Unavailable",
+                "The selected server is no longer available. Please choose a different server before sending a message.",
+                parent=self
+            )
+            return "break"
+
+        self.current_server_config = server_config
+        set_current_server_config(server_config)
+
+        update_session_server(active_session_id, selected_server_name)
+
+        selected_model = self.model_var.get()
+        if selected_model:
+            update_session_model(active_session_id, selected_model)
+
         url_pattern = r'^https?://\S+$'
         if re.match(url_pattern, content) and rag_functions:
             self.load_chat_history()
@@ -3284,7 +4104,7 @@ class ChatApp(tk.Tk):
                 message_blocks,
                 self.model_var.get(),
                 active_session_id,
-                server_config=self.current_server_config,
+                server_config=server_config,
                 widget=self.chat_history
             )
             current_model = self.model_var.get()
@@ -3442,9 +4262,22 @@ def main():
     # Now initialize RAG based on settings
     initialize_rag()
     app = ChatApp()
-    geom = WINDOW_GEOMETRIES.get(DB_PATH)
-    if geom:
-        app.geometry(geom)
+    geom_state = WINDOW_GEOMETRIES.get(DB_PATH)
+    geometry = None
+    sash = None
+    if isinstance(geom_state, dict):
+        geometry = geom_state.get("geometry")
+        sash = geom_state.get("sash")
+    else:
+        geometry = geom_state
+    if geometry:
+        app.geometry(geometry)
+    if sash is not None:
+        app.after_idle(lambda: app.apply_sash_position(sash))
+    else:
+        default_needed = geom_state is None or (isinstance(geom_state, dict) and sash is None)
+        if default_needed:
+            app.after(200, app.apply_default_sash)
     app.mainloop()
 
 if __name__ == "__main__":
