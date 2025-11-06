@@ -12,7 +12,7 @@ import json
 import os
 import re
 import sys
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -139,10 +139,10 @@ def resolve_defaults(args: Dict[str, str]) -> Dict[str, str]:
     return resolved
 
 
-def build_chat_payload(args: Dict[str, str]) -> Dict[str, str]:
+def build_chat_payload(args: Dict[str, str]) -> Dict[str, Any]:
     """Create the JSON payload for the chat endpoint."""
 
-    payload: Dict[str, str] = {"message": args["m"]}
+    payload: Dict[str, Any] = {"message": args["m"], "stream": False}
 
     if args.get("s"):
         payload["server"] = args["s"]

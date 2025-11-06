@@ -1168,7 +1168,47 @@ def stream_and_process_response(resp, widget):
 
     return assistant_full_reply
 
-def send_to_api(session_name, messages, model, current_session_id, server_config=None, widget=None, save_message_to_db=True):
+def _extract_non_stream_content(data):
+    def flatten(content):
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if "text" in item and item["text"]:
+                        parts.append(str(item["text"]))
+                    elif "content" in item and item["content"]:
+                        parts.append(str(item["content"]))
+                elif item is not None:
+                    parts.append(str(item))
+            return "".join(parts)
+        if content is None:
+            return ""
+        return str(content)
+
+    if not isinstance(data, dict):
+        return flatten(data)
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] or {}
+        message_block = choice.get("message")
+        if isinstance(message_block, dict):
+            content = message_block.get("content")
+            if content:
+                return flatten(content)
+        delta_block = choice.get("delta")
+        if isinstance(delta_block, dict):
+            content = delta_block.get("content")
+            if content:
+                return flatten(content)
+        elif isinstance(delta_block, list):
+            return flatten(delta_block)
+
+    fallback = data.get("message") or data.get("text") or data.get("content")
+    return flatten(fallback)
+
+
+def send_to_api(session_name, messages, model, current_session_id, server_config=None, widget=None, save_message_to_db=True, stream=True):
     server = server_config or get_current_server_config()
     if not server:
         raise ValueError("No server configured. Please configure a server in Settings.")
@@ -1191,7 +1231,7 @@ def send_to_api(session_name, messages, model, current_session_id, server_config
     payload = {
         "model": model,
         "messages": messages,
-        "stream": True  # Enable streaming
+        "stream": bool(stream)
     }
 
     assistant_full_reply = ""
@@ -1201,10 +1241,21 @@ def send_to_api(session_name, messages, model, current_session_id, server_config
         widget.see(tk.END)
         widget.update_idletasks()
 
-    with requests.post(url, json=payload, headers=headers, stream=True, verify=verify, timeout=timeout) as resp:
+    if stream:
+        with requests.post(url, json=payload, headers=headers, stream=True, verify=verify, timeout=timeout) as resp:
+            resp.raise_for_status()
+            assistant_full_reply = stream_and_process_response(resp, widget)
+    else:
+        resp = requests.post(url, json=payload, headers=headers, stream=False, verify=verify, timeout=timeout)
         resp.raise_for_status()
-        assistant_full_reply = stream_and_process_response(resp, widget)
-    
+        data = resp.json()
+        assistant_full_reply = _extract_non_stream_content(data)
+        if widget:
+            render_markdown_in_widget(widget, assistant_full_reply)
+            widget.insert(tk.END, "\n\n")
+            widget.see(tk.END)
+            widget.update_idletasks()
+        
     # Save the complete assistant reply after streaming is done
     if save_message_to_db:
         save_message(current_session_id, "assistant", assistant_full_reply)
@@ -2961,6 +3012,8 @@ class ChatApp(tk.Tk):
         if system_prompt is not None and not isinstance(system_prompt, str):
             system_prompt = str(system_prompt)
         title_hint = payload.get("name") or payload.get("title")
+        stream_pref = payload.get("stream")
+        stream_responses = to_bool(stream_pref, default=True)
 
         server_name = requested_server or self.api_tcp_default_server
         if not server_name and self.current_server_config:
@@ -3049,7 +3102,8 @@ class ChatApp(tk.Tk):
                     session_id,
                     server_config=server_config,
                     widget=None,
-                    save_message_to_db=True
+                    save_message_to_db=True,
+                    stream=stream_responses
                 )
             except Exception as exc:
                 return {"ok": False, "error": f"API request failed: {exc}"}
@@ -3111,7 +3165,8 @@ class ChatApp(tk.Tk):
                 current_session_id=0,
                 server_config=server_config,
                 widget=None,
-                save_message_to_db=False
+                save_message_to_db=False,
+                stream=stream_responses
             )
         except Exception as exc:
             return {"ok": False, "error": f"API request failed: {exc}"}
