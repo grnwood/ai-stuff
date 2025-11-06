@@ -12,7 +12,7 @@ import json
 import os
 import re
 import sys
-from typing import Dict
+from typing import Dict, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -27,6 +27,20 @@ BRIDGE_HOST = os.getenv("ASK_TCP_HOST", "127.0.0.1")
 BRIDGE_PORT = int(os.getenv("ASK_TCP_PORT", "8765"))
 MODELS_ENDPOINT = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/models"
 CHAT_ENDPOINT = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/chat"
+
+STDOUT_ENCODING = sys.stdout.encoding or locale.getpreferredencoding(False) or "utf-8"
+
+
+def _make_printable(value: str) -> str:
+    text = value if isinstance(value, str) else str(value)
+    try:
+        text.encode(STDOUT_ENCODING)
+        return text
+    except UnicodeEncodeError:
+        return text.encode(STDOUT_ENCODING, errors="replace").decode(
+            STDOUT_ENCODING,
+            errors="replace",
+        )
 
 
 class InputError(ValueError):
@@ -187,13 +201,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-STDOUT_ENCODING = sys.stdout.encoding or locale.getpreferredencoding(False) or "utf-8"
-
-
-def _make_printable(value: str) -> str:
-    text = value if isinstance(value, str) else str(value)
-    try:
-        text.encode(STDOUT_ENCODING)
-        return text
-    except UnicodeEncodeError:
-        return text.encode(STDOUT_ENCODING, errors="replace").decode(STDOUT_ENCODING, errors="replace")
