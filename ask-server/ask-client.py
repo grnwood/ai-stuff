@@ -2932,6 +2932,8 @@ class ChatApp(tk.Tk):
                 if models:
                     default_model = models[0]
                     break
+        default_server = default_server or "OpenAI"
+        default_model = default_model or "gpt-3.5-turbo"
 
         return {
             "listening": listening,
@@ -3356,6 +3358,32 @@ class ChatApp(tk.Tk):
         port_entry.grid(row=advanced_row, column=1, sticky="w")
         port_entry.bind("<FocusOut>", lambda event: apply_api_tcp_port())
         port_entry.bind("<Return>", lambda event: (apply_api_tcp_port(), "break"))
+        advanced_row += 1
+
+        api_tcp_localhost_var = tk.BooleanVar(value=(self.api_tcp_host == "127.0.0.1"))
+
+        def on_api_tcp_host_toggle():
+            bind_local = api_tcp_localhost_var.get()
+            new_host = "127.0.0.1" if bind_local else "0.0.0.0"
+            if new_host == self.api_tcp_host:
+                return
+            self.api_tcp_host = new_host
+            save_setting("api_tcp_host", new_host)
+            scope_desc = "localhost only" if bind_local else "all interfaces"
+            self.show_status_message(f"API TCP server binding to {scope_desc}")
+            if self.api_tcp_enabled:
+                if not self.restart_api_tcp_server(silent=True):
+                    self.show_status_message("Failed to restart API TCP server; disabling.", duration=4000)
+                    api_tcp_enabled_var.set(False)
+                    self.api_tcp_enabled = False
+                    save_setting("enable_api_tcp_server", "False")
+
+        ttk.Checkbutton(
+            advanced_frame,
+            text="Bind to localhost only",
+            variable=api_tcp_localhost_var,
+            command=on_api_tcp_host_toggle
+        ).grid(row=advanced_row, column=0, columnspan=2, sticky="w")
         advanced_row += 1
 
         server_names = self.server_manager.list_server_names()

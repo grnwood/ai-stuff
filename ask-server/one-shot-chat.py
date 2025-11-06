@@ -77,6 +77,9 @@ def parse_payload(raw: str) -> Dict[str, str]:
         value = match.group("sq") or match.group("dq") or match.group("bare") or ""
         result[key] = value.strip()
 
+    if not result:
+        result["m"] = raw.strip()
+
     if "m" not in result or not result["m"]:
         raise InputError("Message field 'm' is required (e.g. m:'Hello world').")
 
@@ -117,8 +120,9 @@ def resolve_defaults(args: Dict[str, str]) -> Dict[str, str]:
     resolved = dict(args)  # copy
 
     server_name = resolved.get("s") or defaults.get("server")
-    if server_name:
-        resolved["s"] = server_name
+    if not server_name:
+        server_name = "OpenAI"
+    resolved["s"] = server_name
 
     model_name = resolved.get("md")
     if not model_name:
@@ -128,8 +132,9 @@ def resolve_defaults(args: Dict[str, str]) -> Dict[str, str]:
                 model_name = server_models[0]
         if not model_name:
             model_name = defaults.get("model")
-    if model_name:
-        resolved["md"] = model_name
+    if not model_name:
+        model_name = "gpt-3.5-turbo"
+    resolved["md"] = model_name
 
     return resolved
 
