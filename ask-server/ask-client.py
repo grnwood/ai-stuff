@@ -131,12 +131,33 @@ DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 DEFAULT_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-try:
-    DEFAULT_API_TCP_PORT = int(os.getenv("API_TCP_PORT", "8765"))
-except ValueError:
-    DEFAULT_API_TCP_PORT = 8765
+def _get_default_tcp_port() -> int:
+    candidates = [
+        os.getenv("API_TCP_PORT"),
+        os.getenv("ASK_TCP_PORT"),
+        "8765",
+    ]
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            port = int(value)
+            if 1 <= port <= 65535:
+                return port
+        except ValueError:
+            continue
+    return 8765
+
+
+DEFAULT_API_TCP_PORT = _get_default_tcp_port()
 
 DEFAULT_API_TCP_ENABLED = os.getenv("ENABLE_API_TCP_SERVER", "False").strip().lower() in ("true", "1", "yes", "on")
+
+DEFAULT_API_TCP_HOST = (
+    os.getenv("API_TCP_HOST")
+    or os.getenv("ASK_TCP_HOST")
+    or "127.0.0.1"
+)
 
 try:
     DEFAULT_API_SERVER_CACHE_TTL = int(os.getenv("API_SERVER_CACHE_TTL", "3600"))
@@ -393,6 +414,10 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_create_ui_chats', 'False')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_ephemeral_ttl_minutes', '60')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_folder_name', 'API Chats')")
+    c.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_host', ?)",
+        (DEFAULT_API_TCP_HOST,),
+    )
     conn.commit()
     conn.close()
 
@@ -1425,6 +1450,7 @@ class ChatApp(tk.Tk):
 
         self.api_tcp_enabled = to_bool(get_setting("enable_api_tcp_server", "False"), default=DEFAULT_API_TCP_ENABLED)
         self.api_tcp_port = self._coerce_tcp_port(get_setting("api_tcp_port", str(DEFAULT_API_TCP_PORT)))
+        self.api_tcp_host = get_setting("api_tcp_host", DEFAULT_API_TCP_HOST) or DEFAULT_API_TCP_HOST
         default_server_name = self.current_server_config["name"] if self.current_server_config else ""
         default_model_name = self.current_server_config.get("default_model") if self.current_server_config else ""
         self.api_tcp_default_server = get_setting("api_tcp_default_server", "") or default_server_name
@@ -2826,16 +2852,25 @@ class ChatApp(tk.Tk):
     def start_api_tcp_server(self, *, silent=False):
         if self.api_tcp_server_thread and self.api_tcp_server_thread.is_alive():
             if not silent:
-                self.show_status_message(f"API TCP server already running on port {self.api_tcp_port}", duration=2500)
+                self.show_status_message(
+                    f"API TCP server already running on {self.api_tcp_host}:{self.api_tcp_port}",
+                    duration=2500,
+                )
             return True
         port = self._coerce_tcp_port(self.api_tcp_port)
         self.api_tcp_port = port
         save_setting("api_tcp_port", port)
+        host = self.api_tcp_host or DEFAULT_API_TCP_HOST
+        self.api_tcp_host = host
+        save_setting("api_tcp_host", host)
         try:
-            self.api_tcp_server_thread = APIChatTCPServer(self, port=port)
+            self.api_tcp_server_thread = APIChatTCPServer(self, host=host, port=port)
             self.api_tcp_server_thread.start()
             if not silent:
-                self.show_status_message(f"API TCP server listening on port {port}", duration=2500)
+                self.show_status_message(
+                    f"API TCP server listening on {host}:{port}",
+                    duration=2500,
+                )
             return True
         except Exception as exc:
             self.api_tcp_server_thread = None
