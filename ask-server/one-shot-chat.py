@@ -15,7 +15,13 @@ import sys
 from typing import Dict
 
 import requests
+from dotenv import load_dotenv
 
+
+import locale
+
+
+load_dotenv()
 
 BRIDGE_HOST = os.getenv("ASK_TCP_HOST", "127.0.0.1")
 BRIDGE_PORT = int(os.getenv("ASK_TCP_PORT", "8765"))
@@ -173,11 +179,21 @@ def main() -> int:
     if chat_id is None:
         chat_id = resolved.get("c") or ""
 
-    print(f"c:{chat_id}")
-    print(f"m:{message}")
-    print(f"md:{model_used}")
+    print(f"c:{_make_printable(chat_id)}")
+    print(f"m:{_make_printable(message)}")
+    print(f"md:{_make_printable(model_used)}")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+STDOUT_ENCODING = sys.stdout.encoding or locale.getpreferredencoding(False) or "utf-8"
+
+
+def _make_printable(value: str) -> str:
+    text = value if isinstance(value, str) else str(value)
+    try:
+        text.encode(STDOUT_ENCODING)
+        return text
+    except UnicodeEncodeError:
+        return text.encode(STDOUT_ENCODING, errors="replace").decode(STDOUT_ENCODING, errors="replace")
