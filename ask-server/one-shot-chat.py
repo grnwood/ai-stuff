@@ -122,9 +122,9 @@ def resolve_defaults(args: Dict[str, str]) -> Dict[str, str]:
     server_name = resolved.get("s") or defaults.get("server")
     if not server_name:
         server_name = "OpenAI"
-    resolved["s"] = server_name
+    resolved["s"] = server_name 
 
-    model_name = resolved.get("md")
+    model_name = resolved.get("md") or defaults.get("model")
     if not model_name:
         if server_name and server_name in servers_index:
             server_models = servers_index.get(server_name) or []
