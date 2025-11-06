@@ -78,6 +78,16 @@ def parse_payload(raw: str) -> Dict[str, str]:
         result[key] = value.strip()
 
     if not result:
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped or ":" not in stripped:
+                continue
+            key, value = stripped.split(":", 1)
+            key = key.strip().lower()
+            if key in {"s", "md", "p", "c", "m"}:
+                result[key] = value.strip()
+
+    if not result:
         result["m"] = raw.strip()
 
     if "m" not in result or not result["m"]:
