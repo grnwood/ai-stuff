@@ -78,7 +78,8 @@ def fetch_url_text(url: str) -> str:
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
     }
-    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+    validate_ssl = to_bool(get_setting("validate_url_ssl", "True"), default=True)
+    resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10, verify=validate_ssl)
     resp.raise_for_status()
 
     content_type = resp.headers.get("Content-Type", "").lower()
@@ -357,6 +358,7 @@ def init_db():
                 )''')
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_rag', 'true')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_summarize_chats', 'True')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('validate_url_ssl', 'True')")
     conn.commit()
     conn.close()
 
@@ -2509,6 +2511,15 @@ class ChatApp(tk.Tk):
             save_setting("enable_rag", rag_var.get())
             messagebox.showinfo("Restart Required", "Please restart the application for the RAG setting to take effect.", parent=settings_win)
         ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=19, column=0, sticky="w", padx=20)
+
+        ttk.Label(settings_win, text="Validate SSL certificates for URL extraction:").grid(row=20, column=0, sticky="w", pady=5, padx=20)
+        url_ssl_var = tk.BooleanVar(value=to_bool(get_setting("validate_url_ssl", "True"), default=True))
+
+        def on_url_ssl_toggle():
+            save_setting("validate_url_ssl", url_ssl_var.get())
+
+        ttk.Checkbutton(settings_win, variable=url_ssl_var, command=on_url_ssl_toggle).grid(row=21, column=0, sticky="w", padx=20)
+        self.validate_url_ssl_var = url_ssl_var
 
     def export_chat(self, session_id=None, default_name=None):
         session_id = session_id or self.session_id
