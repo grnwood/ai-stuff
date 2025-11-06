@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""One-shot client for SlipStreamAI TCP bridge.
+
+Accepts a compact CLI payload describing the desired server/model/message and
+forwards it to the running ask-client bridge. The program prints the response in
+`key:value` format so other tools can consume it easily.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from typing import Dict
+
+import requests
+
+
+BRIDGE_HOST = os.getenv("ASK_TCP_HOST", "127.0.0.1")
+BRIDGE_PORT = int(os.getenv("ASK_TCP_PORT", "8765"))
+MODELS_ENDPOINT = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/models"
+CHAT_ENDPOINT = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/chat"
+
+
+class InputError(ValueError):
+    """Raised when the incoming payload is malformed."""
+
+
+def read_cli_payload() -> str:
+    """Return the raw payload from CLI args or STDIN."""
+
+    if len(sys.argv) > 1:
+        return " ".join(sys.argv[1:]).strip()
+
+    data = sys.stdin.read().strip()
+    if data:
+        return data
+
+    raise InputError(
+        "No input provided. Supply key/value pairs such as "
+        "m:'Hello' s:'Proxy Server' via CLI args or STDIN."
+    )
+
+
+def parse_payload(raw: str) -> Dict[str, str]:
+    """Parse the compact k:'v' payload into a dictionary."""
+
+    pattern = re.compile(
+        r"\b(?P<key>s|md|p|c|m)\s*:\s*(?:'(?P<sq>[^']*)'|\"(?P<dq>[^\"]*)\"|(?P<bare>[^\s]+))",
+        re.IGNORECASE,
+    )
+
+    result: Dict[str, str] = {}
+    for match in pattern.finditer(raw):
+        key = match.group("key").lower()
+        value = match.group("sq") or match.group("dq") or match.group("bare") or ""
+        result[key] = value.strip()
+
+    if "m" not in result or not result["m"]:
+        raise InputError("Message field 'm' is required (e.g. m:'Hello world').")
+
+    return result
+
+
+def fetch_server_defaults() -> Tuple[Dict[str, str], Dict[str, list]]:
+    """Fetch defaults and server model lists from the bridge."""
+
+    try:
+        response = requests.get(MODELS_ENDPOINT, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to query models endpoint: {exc}") from exc
+
+    payload = response.json()
+
+    defaults = {
+        "server": payload.get("default_server", ""),
+        "model": payload.get("default_model", ""),
+    }
+
+    servers_index: Dict[str, list] = {}
+    for entry in payload.get("servers", []):
+        name = (entry or {}).get("name")
+        if not name:
+            continue
+        servers_index[name] = list((entry or {}).get("models", []) or [])
+
+    return defaults, servers_index
+
+
+def resolve_defaults(args: Dict[str, str]) -> Dict[str, str]:
+    """Fill in missing fields using bridge defaults and server model list."""
+
+    defaults, servers_index = fetch_server_defaults()
+
+    resolved = dict(args)  # copy
+
+    server_name = resolved.get("s") or defaults.get("server")
+    if server_name:
+        resolved["s"] = server_name
+
+    model_name = resolved.get("md")
+    if not model_name:
+        if server_name and server_name in servers_index:
+            server_models = servers_index.get(server_name) or []
+            if server_models:
+                model_name = server_models[0]
+        if not model_name:
+            model_name = defaults.get("model")
+    if model_name:
+        resolved["md"] = model_name
+
+    return resolved
+
+
+def build_chat_payload(args: Dict[str, str]) -> Dict[str, str]:
+    """Create the JSON payload for the chat endpoint."""
+
+    payload: Dict[str, str] = {"message": args["m"]}
+
+    if args.get("s"):
+        payload["server"] = args["s"]
+
+    if args.get("md"):
+        payload["model"] = args["md"]
+
+    if args.get("p"):
+        payload["system_prompt"] = args["p"]
+
+    if args.get("c"):
+        payload["chat_id"] = args["c"]
+
+    return payload
+
+
+def send_chat(payload: Dict[str, str]) -> Dict[str, str]:
+    """Send the chat request and return the JSON reply."""
+
+    try:
+        response = requests.post(
+            CHAT_ENDPOINT,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to send chat request: {exc}") from exc
+
+    return response.json()
+
+
+def main() -> int:
+    resolved: Dict[str, str] = {}
+
+    try:
+        raw = read_cli_payload()
+        parsed = parse_payload(raw)
+        resolved = resolve_defaults(parsed)
+        chat_payload = build_chat_payload(resolved)
+        reply = send_chat(chat_payload)
+    except InputError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 3
+
+    chat_id = reply.get("chat_id")
+    message = reply.get("message", "")
+    model_used = reply.get("model") or reply.get("last_model_used") or resolved.get("md", "")
+
+    if chat_id is None:
+        chat_id = resolved.get("c") or ""
+
+    print(f"c:{chat_id}")
+    print(f"m:{message}")
+    print(f"md:{model_used}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,6 +8,11 @@ import sqlite3
 import argparse
 import sys
 import re
+import queue
+import socket
+import threading
+import uuid
+import time
 from markdown import markdown
 from html.parser import HTMLParser
 from tkinter import PhotoImage
@@ -126,6 +131,19 @@ DEFAULT_API_SECRET = os.getenv("API_SECRET_TOKEN", "my-secret-token")
 DEFAULT_VERIFY_CERT = os.getenv("PROXY_VERIFY_CERT", "False").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+try:
+    DEFAULT_API_TCP_PORT = int(os.getenv("API_TCP_PORT", "8765"))
+except ValueError:
+    DEFAULT_API_TCP_PORT = 8765
+
+DEFAULT_API_TCP_ENABLED = os.getenv("ENABLE_API_TCP_SERVER", "False").strip().lower() in ("true", "1", "yes", "on")
+
+try:
+    DEFAULT_API_SERVER_CACHE_TTL = int(os.getenv("API_SERVER_CACHE_TTL", "3600"))
+except ValueError:
+    DEFAULT_API_SERVER_CACHE_TTL = 3600
+DEFAULT_API_SERVER_CACHE_TTL = max(60, DEFAULT_API_SERVER_CACHE_TTL)
+
 CURRENT_SERVER_CONFIG = None
 
 SERVER_CONFIG_FILE = os.path.join(PROJECT_ROOT, "server_configs.json")
@@ -152,6 +170,15 @@ def to_bool(value, default=False):
     if isinstance(value, str):
         return value.strip().lower() in ("true", "1", "yes", "y", "on")
     return bool(value)
+
+
+def format_bytes(value: int) -> str:
+    size = float(max(0, value))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def build_default_server_configs():
@@ -359,6 +386,13 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_rag', 'true')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_summarize_chats', 'True')")
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('validate_url_ssl', 'True')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_api_tcp_server', ?)", ('True' if DEFAULT_API_TCP_ENABLED else 'False',))
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_port', ?)", (str(DEFAULT_API_TCP_PORT),))
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_default_server', '')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_default_model', '')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_create_ui_chats', 'False')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_ephemeral_ttl_minutes', '60')")
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('api_tcp_folder_name', 'API Chats')")
     conn.commit()
     conn.close()
 
@@ -398,6 +432,223 @@ def save_setting(key, value):
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+
+
+class APIChatTCPServer(threading.Thread):
+    """Simple TCP server that accepts chat commands from external tools."""
+
+    def __init__(self, app, host="127.0.0.1", port=8765):
+        super().__init__(daemon=True)
+        self.app = app
+        self.host = host
+        self.port = port
+        self._stop_event = threading.Event()
+        self._server_socket = None
+
+    def run(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
+                server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_sock.bind((self.host, self.port))
+                server_sock.listen(5)
+                server_sock.settimeout(1.0)
+                self._server_socket = server_sock
+                print(f"API TCP server listening on {self.host}:{self.port}")
+                while not self._stop_event.is_set():
+                    try:
+                        client_socket, addr = server_sock.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    threading.Thread(
+                        target=self.handle_client,
+                        args=(client_socket, addr),
+                        daemon=True,
+                    ).start()
+        except Exception as exc:
+            print(f"API TCP server error: {exc}")
+            try:
+                self.app.after(0, lambda e=exc: self.app.on_api_tcp_server_error(e))
+            except Exception:
+                pass
+        finally:
+            self._server_socket = None
+
+    def stop(self):
+        self._stop_event.set()
+        try:
+            with socket.create_connection((self.host, self.port), timeout=0.2):
+                pass
+        except Exception:
+            pass
+        if self._server_socket:
+            try:
+                self._server_socket.close()
+            except OSError:
+                pass
+            self._server_socket = None
+
+    def handle_client(self, client_socket, addr):
+        addr_repr = f"{addr[0]}:{addr[1]}"
+        print(f"API TCP client connected: {addr_repr}")
+        try:
+            with client_socket:
+                reader = client_socket.makefile("r", encoding="utf-8", newline="\n")
+                writer = client_socket.makefile("w", encoding="utf-8", newline="\n")
+                try:
+                    first_raw_line = reader.readline()
+                except UnicodeDecodeError:
+                    print("API TCP client sent binary or TLS data; closing connection.")
+                    return
+
+                if not first_raw_line:
+                    return
+
+                first_line = first_raw_line.strip()
+                if first_line.upper().startswith(("GET ", "POST ", "OPTIONS ", "HEAD ")):
+                    self._handle_http_exchange(client_socket, reader, first_line, addr_repr)
+                    return
+
+                self._send_json(writer, {"ok": True, "message": "connected"})
+
+                def iter_lines(initial):
+                    if initial:
+                        yield initial
+                    for subsequent in reader:
+                        yield subsequent.strip()
+
+                for raw_line in iter_lines(first_line):
+                    if self._stop_event.is_set():
+                        break
+                    data = (raw_line or "").strip()
+                    if not data:
+                        continue
+                    if data.startswith("/"):
+                        response = self.app.handle_api_tcp_command(data)
+                        self._send_json(writer, response)
+                        continue
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        self._send_json(writer, {"ok": False, "error": "Invalid JSON payload."})
+                        continue
+                    response = self.app.process_api_tcp_payload(payload)
+                    self._send_json(writer, response)
+        except Exception as exc:
+            print(f"API TCP client error: {exc}")
+
+    def _handle_http_exchange(self, client_socket, reader, first_line, addr_repr):
+        try:
+            parts = first_line.split()
+            if len(parts) < 2:
+                self._send_http_response(client_socket, 400, {"error": "Malformed request line."})
+                return
+            method = parts[0].upper()
+            path = parts[1]
+
+            headers = {}
+            while True:
+                try:
+                    header_line = reader.readline()
+                except UnicodeDecodeError:
+                    self._send_http_response(client_socket, 400, {"error": "Invalid header encoding."})
+                    return
+                if header_line in ("", "\n", "\r\n"):
+                    break
+                if ":" not in header_line:
+                    continue
+                key, value = header_line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+
+            if method == "OPTIONS":
+                self._send_http_response(client_socket, 204, None, extra_headers={
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type",
+                })
+                return
+
+            if method == "GET" and path == "/models":
+                payload = self.app.describe_api_tcp_servers()
+                self._send_http_response(client_socket, 200, payload)
+                return
+
+            if method == "POST" and path in ("/chat", "/chats"):
+                content_length = headers.get("content-length")
+                if not content_length:
+                    self._send_http_response(client_socket, 411, {"error": "Missing Content-Length header."})
+                    return
+                try:
+                    length = int(content_length)
+                except ValueError:
+                    self._send_http_response(client_socket, 400, {"error": "Invalid Content-Length."})
+                    return
+
+                body = reader.read(length)
+                if body is None:
+                    body = ""
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError as exc:
+                    self._send_http_response(client_socket, 400, {"error": f"Invalid JSON payload: {exc}"})
+                    return
+
+                response = self.app.process_api_tcp_payload(payload)
+                self._send_http_response(client_socket, 200, response)
+                return
+
+            self._send_http_response(client_socket, 404, {"error": "Endpoint not found."})
+        except Exception as exc:
+            print(f"API TCP HTTP error from {addr_repr}: {exc}")
+            try:
+                self._send_http_response(client_socket, 500, {"error": "Internal server error."})
+            except Exception:
+                pass
+
+    def _send_http_response(self, client_socket, status_code, payload, extra_headers=None):
+        reason_map = {
+            200: "OK",
+            204: "No Content",
+            400: "Bad Request",
+            404: "Not Found",
+            411: "Length Required",
+            500: "Internal Server Error",
+        }
+        reason = reason_map.get(status_code, "OK")
+        body = ""
+        if payload is None:
+            body_bytes = b""
+        elif isinstance(payload, str):
+            body = payload
+            body_bytes = body.encode("utf-8")
+        else:
+            body = json.dumps(payload, indent=2)
+            body_bytes = body.encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json" if payload is not None else "text/plain",
+            "Content-Length": str(len(body_bytes)),
+            "Access-Control-Allow-Origin": "*",
+            "Connection": "close",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+
+        header_lines = [f"HTTP/1.1 {status_code} {reason}"]
+        for key, value in headers.items():
+            header_lines.append(f"{key}: {value}")
+        response = "\r\n".join(header_lines) + "\r\n\r\n"
+        try:
+            client_socket.sendall(response.encode("utf-8") + body_bytes)
+        finally:
+            client_socket.close()
+
+    def _send_json(self, writer, payload):
+        try:
+            writer.write(json.dumps(payload) + "\n")
+            writer.flush()
+        except Exception as exc:
+            print(f"API TCP send error: {exc}")
 
 
 class ServerManager:
@@ -732,6 +983,15 @@ def get_sessions():
     sessions = c.fetchall()
     conn.close()
     return sessions
+
+def get_session_by_id(session_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT id, name, model, server_name, last_model_used, system_prompt, system_prompt_id, parent_id, type
+                 FROM sessions WHERE id = ?""", (session_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
 
 def create_session(name, model='gpt-3.5-turbo', system_prompt='', type='chat', parent_id=None, system_prompt_id=None,
                    last_model_used=None, server_name=None):
@@ -1163,6 +1423,25 @@ class ChatApp(tk.Tk):
         self.rag_enabled = get_setting("enable_rag", "True") == "True"
         self.last_model_used = None
 
+        self.api_tcp_enabled = to_bool(get_setting("enable_api_tcp_server", "False"), default=DEFAULT_API_TCP_ENABLED)
+        self.api_tcp_port = self._coerce_tcp_port(get_setting("api_tcp_port", str(DEFAULT_API_TCP_PORT)))
+        default_server_name = self.current_server_config["name"] if self.current_server_config else ""
+        default_model_name = self.current_server_config.get("default_model") if self.current_server_config else ""
+        self.api_tcp_default_server = get_setting("api_tcp_default_server", "") or default_server_name
+        self.api_tcp_default_model = get_setting("api_tcp_default_model", "") or (default_model_name or "")
+        self.api_tcp_create_ui_chats = to_bool(get_setting("api_tcp_create_ui_chats", "False"), default=False)
+        self.api_tcp_ephemeral_ttl_minutes = self._coerce_positive_int(get_setting("api_tcp_ephemeral_ttl_minutes", "60"), default=60)
+        self.api_tcp_folder_name = (get_setting("api_tcp_folder_name", "API Chats") or "API Chats").strip() or "API Chats"
+        self.api_tcp_server_thread = None
+        self.api_tcp_ephemeral_chats = {}
+        self.api_tcp_notifications = queue.Queue()
+        self.api_tcp_ephemeral_cleanup_job = None
+        self._ephemeral_stats_var = None
+        self.api_tcp_folder_id = None
+        self.api_server_models_cache = {}
+        self.api_server_cache_ttl = DEFAULT_API_SERVER_CACHE_TTL
+        self.api_server_cache_lock = threading.Lock()
+
         initial_server_name = self.current_server_config["name"] if self.current_server_config else ""
         self.server_var = tk.StringVar(value=initial_server_name)
 
@@ -1201,6 +1480,10 @@ class ChatApp(tk.Tk):
 
         # Ensure the process exits cleanly when the window is closed
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.after(500, self._process_api_tcp_notifications)
+        self.initialize_api_tcp_server()
+        self.schedule_ephemeral_cleanup()
 
     def load_rag(self, path):
         """Load a ChromaDB RAG database from ``path``."""
@@ -1264,6 +1547,13 @@ class ChatApp(tk.Tk):
         # Ensure any RAG-related resources are released
         if hasattr(self, "rag_manager"):
             self.rag_manager.close()
+        if getattr(self, "api_tcp_ephemeral_cleanup_job", None):
+            try:
+                self.after_cancel(self.api_tcp_ephemeral_cleanup_job)
+            except Exception:
+                pass
+            self.api_tcp_ephemeral_cleanup_job = None
+        self.stop_api_tcp_server(silent=True)
         WINDOW_GEOMETRIES[DB_PATH] = self.get_window_state()
         save_window_geometries(WINDOW_GEOMETRIES)
         self.destroy()
@@ -2366,45 +2656,498 @@ class ChatApp(tk.Tk):
         self.chat_history.configure(selectbackground=bg, selectforeground=fg)
         self.input_box.configure(selectbackground=bg, selectforeground=fg)
 
+    def _coerce_tcp_port(self, value):
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            port = DEFAULT_API_TCP_PORT
+        if port < 1 or port > 65535:
+            port = DEFAULT_API_TCP_PORT
+        return port
+
+    def _coerce_positive_int(self, value, default=1):
+        try:
+            converted = int(value)
+        except (TypeError, ValueError):
+            converted = default
+        if converted <= 0:
+            converted = default
+        return converted
+
+    def schedule_ephemeral_cleanup(self):
+        if hasattr(self, "api_tcp_ephemeral_cleanup_job") and self.api_tcp_ephemeral_cleanup_job:
+            self.after_cancel(self.api_tcp_ephemeral_cleanup_job)
+            self.api_tcp_ephemeral_cleanup_job = None
+        if not hasattr(self, "api_tcp_ephemeral_ttl_minutes"):
+            return
+        self.api_tcp_ephemeral_cleanup_job = self.after(60_000, self._cleanup_ephemeral_chats)
+
+    def _cleanup_ephemeral_chats(self):
+        self.api_tcp_ephemeral_cleanup_job = None
+        ttl_seconds = max(1, getattr(self, "api_tcp_ephemeral_ttl_minutes", 60)) * 60
+        now = time.time()
+        expired_keys = []
+        for key, session in list(self.api_tcp_ephemeral_chats.items()):
+            last_access = session.get("last_access", now)
+            if now - last_access >= ttl_seconds:
+                expired_keys.append(key)
+        if expired_keys:
+            for key in expired_keys:
+                self.api_tcp_ephemeral_chats.pop(key, None)
+            self.refresh_ephemeral_stats_label()
+            self.show_status_message(f"Expired {len(expired_keys)} ephemeral chat(s).", duration=3000)
+        self.schedule_ephemeral_cleanup()
+
+    def get_ephemeral_stats(self):
+        sessions = len(self.api_tcp_ephemeral_chats)
+        message_count = 0
+        byte_count = 0
+        for session in self.api_tcp_ephemeral_chats.values():
+            messages = session.get("messages", [])
+            message_count += len(messages)
+            for msg in messages:
+                if isinstance(msg, dict):
+                    byte_count += len((msg.get("content") or ""))
+        return sessions, message_count, byte_count
+
+    def refresh_ephemeral_stats_label(self):
+        stats_var = getattr(self, "_ephemeral_stats_var", None)
+        if not stats_var:
+            return
+        sessions, message_count, byte_count = self.get_ephemeral_stats()
+        stats_var.set(f"{sessions} session(s), {message_count} message(s), ~{format_bytes(byte_count)}")
+
+    def clear_ephemeral_chats(self):
+        cleared = len(self.api_tcp_ephemeral_chats)
+        if cleared:
+            self.api_tcp_ephemeral_chats.clear()
+            self.refresh_ephemeral_stats_label()
+            self.show_status_message(f"Cleared {cleared} ephemeral chat(s).", duration=3000)
+        else:
+            self.show_status_message("No ephemeral chats to clear.", duration=2500)
+        self.schedule_ephemeral_cleanup()
+
+    def get_api_folder_name(self):
+        name = (self.api_tcp_folder_name or "").strip() or "API Chats"
+        return name
+
+    def reset_api_folder_cache(self):
+        self.api_tcp_folder_id = None
+
+    def get_or_create_api_folder(self):
+        target_name = self.get_api_folder_name()
+
+        if getattr(self, "api_tcp_folder_id", None):
+            record = get_session_by_id(self.api_tcp_folder_id)
+            if record and record[8] == 'folder' and record[1] == target_name:
+                return self.api_tcp_folder_id, False
+            self.api_tcp_folder_id = None
+
+        for record in get_sessions():
+            if record[8] == 'folder' and record[1] == target_name:
+                self.api_tcp_folder_id = record[0]
+                return self.api_tcp_folder_id, False
+
+        folder_id = create_session(
+            target_name,
+            model='gpt-3.5-turbo',
+            system_prompt='',
+            type='folder',
+            parent_id=None,
+            system_prompt_id=None,
+            last_model_used='gpt-3.5-turbo',
+            server_name=None
+        )
+        self.api_tcp_folder_id = folder_id
+        return folder_id, True
+
+    def get_cached_server_models(self, server_config, force=False):
+        if not server_config:
+            return []
+
+        key = (
+            server_config.get("name"),
+            server_config.get("base_url"),
+            server_config.get("models_path"),
+        )
+        now = time.time()
+        ttl = self.api_server_cache_ttl
+
+        with self.api_server_cache_lock:
+            entry = self.api_server_models_cache.get(key)
+            if entry and not force and (now - entry.get("timestamp", 0)) < ttl:
+                return list(entry.get("models", []))
+
+        try:
+            models = list(get_available_models(server_config))
+        except Exception as exc:
+            print(f"Failed to retrieve models for server {server_config.get('name')}: {exc}")
+            models = []
+
+        if not models:
+            fallback_model = server_config.get("default_model") or "gpt-3.5-turbo"
+            models = [fallback_model]
+
+        with self.api_server_cache_lock:
+            self.api_server_models_cache[key] = {
+                "timestamp": now,
+                "models": list(models),
+            }
+
+        return models
+
+    def _process_api_tcp_notifications(self):
+        try:
+            while True:
+                notice = self.api_tcp_notifications.get_nowait()
+                if not notice:
+                    continue
+                if notice.get("refresh_ephemeral"):
+                    self.refresh_ephemeral_stats_label()
+                if notice.get("refresh_sessions"):
+                    self.load_sessions(set_selection=False)
+                session_id = notice.get("session_id")
+                new_chat = bool(notice.get("new_chat"))
+                if new_chat:
+                    self.load_sessions(set_selection=False)
+                if session_id and self.session_id == session_id:
+                    self.load_chat_history()
+                    self.refresh_last_model_label()
+        except queue.Empty:
+            pass
+        finally:
+            if self.winfo_exists():
+                self.after(500, self._process_api_tcp_notifications)
+
+    def initialize_api_tcp_server(self):
+        if self.api_tcp_enabled:
+            self.start_api_tcp_server(silent=True)
+
+    def start_api_tcp_server(self, *, silent=False):
+        if self.api_tcp_server_thread and self.api_tcp_server_thread.is_alive():
+            if not silent:
+                self.show_status_message(f"API TCP server already running on port {self.api_tcp_port}", duration=2500)
+            return True
+        port = self._coerce_tcp_port(self.api_tcp_port)
+        self.api_tcp_port = port
+        save_setting("api_tcp_port", port)
+        try:
+            self.api_tcp_server_thread = APIChatTCPServer(self, port=port)
+            self.api_tcp_server_thread.start()
+            if not silent:
+                self.show_status_message(f"API TCP server listening on port {port}", duration=2500)
+            return True
+        except Exception as exc:
+            self.api_tcp_server_thread = None
+            self.api_tcp_enabled = False
+            save_setting("enable_api_tcp_server", "False")
+            self.show_status_message(f"Failed to start API TCP server: {exc}", duration=5000)
+            return False
+
+    def stop_api_tcp_server(self, *, silent=False):
+        if self.api_tcp_server_thread:
+            self.api_tcp_server_thread.stop()
+            self.api_tcp_server_thread.join(timeout=1.5)
+            self.api_tcp_server_thread = None
+            if not silent:
+                self.show_status_message("API TCP server stopped", duration=2500)
+
+    def restart_api_tcp_server(self, *, silent=False):
+        self.stop_api_tcp_server(silent=True)
+        if self.api_tcp_enabled:
+            return self.start_api_tcp_server(silent=silent)
+        return True
+
+    def on_api_tcp_server_error(self, exc):
+        self.api_tcp_server_thread = None
+        if self.api_tcp_enabled:
+            self.api_tcp_enabled = False
+            save_setting("enable_api_tcp_server", "False")
+        self.show_status_message(f"API TCP server error: {exc}", duration=6000)
+
+    def handle_api_tcp_command(self, command):
+        normalized = command.strip().lower()
+        if normalized == "/models":
+            return {"ok": True, "data": self.describe_api_tcp_servers()}
+        return {"ok": False, "error": f"Unknown command '{command.strip()}'"}
+
+    def describe_api_tcp_servers(self):
+        servers_info = []
+        for config in self.server_manager.load_servers():
+            models = self.get_cached_server_models(config)
+            servers_info.append({
+                "name": config.get("name"),
+                "base_url": config.get("base_url"),
+                "models": models,
+            })
+
+        listening = bool(self.api_tcp_server_thread and self.api_tcp_server_thread.is_alive())
+        default_server = self.api_tcp_default_server or self.server_manager.get_active_server_name()
+        if not default_server and self.server_configs:
+            default_server = self.server_configs[0].get("name")
+        if not default_server and servers_info:
+            default_server = servers_info[0].get("name")
+
+        default_model = self.api_tcp_default_model
+        if not default_model and self.current_server_config:
+            default_model = self.current_server_config.get("default_model")
+        if not default_model and servers_info:
+            for entry in servers_info:
+                models = entry.get("models") or []
+                if models:
+                    default_model = models[0]
+                    break
+
+        return {
+            "listening": listening,
+            "port": self.api_tcp_port,
+            "default_server": default_server,
+            "default_model": default_model,
+            "create_ui_chats": self.api_tcp_create_ui_chats,
+            "ui_folder": self.get_api_folder_name() if self.api_tcp_create_ui_chats else None,
+            "servers": servers_info,
+        }
+
+    def process_api_tcp_payload(self, payload):
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "Payload must be a JSON object."}
+
+        message = payload.get("message")
+        if not isinstance(message, str) or not message.strip():
+            return {"ok": False, "error": "Payload must include a non-empty 'message' string."}
+        message = message.strip()
+
+        requested_server = payload.get("server")
+        requested_model = payload.get("model")
+        chat_id = payload.get("chat_id")
+        system_prompt = payload.get("system_prompt")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            system_prompt = str(system_prompt)
+        title_hint = payload.get("name") or payload.get("title")
+
+        server_name = requested_server or self.api_tcp_default_server
+        if not server_name and self.current_server_config:
+            server_name = self.current_server_config.get("name")
+        if not server_name:
+            server_name = self.server_manager.get_active_server_name()
+        if not server_name:
+            available = self.server_manager.list_server_names()
+            server_name = available[0] if available else None
+        if not server_name:
+            return {"ok": False, "error": "No server is configured for API chats."}
+
+        server_config = self.server_manager.get_server(server_name)
+        if not server_config:
+            if requested_server:
+                return {"ok": False, "error": f"Unknown server '{requested_server}'."}
+            available = self.server_manager.list_server_names()
+            if not available:
+                return {"ok": False, "error": "No server configuration available."}
+            server_name = available[0]
+            server_config = self.server_manager.get_server(server_name)
+
+        model = requested_model or self.api_tcp_default_model or server_config.get("default_model") or "gpt-3.5-turbo"
+        current_time = time.time()
+
+        if self.api_tcp_create_ui_chats:
+            try:
+                session_id = int(chat_id) if chat_id is not None else None
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "chat_id must be an integer when persistence is enabled."}
+
+            is_new_chat = False
+            session_name = None
+            previous_model = model
+            session_prompt = system_prompt or ""
+            if session_id is not None:
+                session_record = get_session_by_id(session_id)
+                if not session_record:
+                    return {"ok": False, "error": f"Chat id {session_id} not found."}
+                session_name = session_record[1]
+                stored_prompt = session_record[5] or ""
+                previous_model = session_record[4] or session_record[2] or model
+                if system_prompt is None:
+                    session_prompt = stored_prompt
+                else:
+                    update_session_system_prompt(session_id, session_prompt)
+            else:
+                folder_id, folder_created = self.get_or_create_api_folder()
+                if folder_created:
+                    self.api_tcp_notifications.put({"refresh_sessions": True})
+
+                suffix_raw = (title_hint or uuid.uuid4().hex[:8].upper())
+                suffix = suffix_raw.strip() or uuid.uuid4().hex[:8].upper()
+                session_name = suffix
+                if not session_name.lower().startswith("api:"):
+                    session_name = f"API: {session_name}"
+                session_prompt = system_prompt or ""
+                session_id = create_session(
+                    session_name,
+                    model,
+                    session_prompt,
+                    type='chat',
+                    parent_id=folder_id,
+                    system_prompt_id=None,
+                    last_model_used=model,
+                    server_name=server_name
+                )
+                is_new_chat = True
+                previous_model = model
+
+            save_message(session_id, "user", message)
+            save_input_history(session_id, message)
+            update_session_server(session_id, server_name)
+            update_session_model(session_id, model)
+
+            db_messages = get_messages(session_id)
+            message_blocks = [{"role": role, "content": content} for role, content in db_messages]
+            if session_prompt:
+                message_blocks.insert(0, {"role": "system", "content": session_prompt})
+
+            try:
+                assistant_reply = send_to_api(
+                    session_name,
+                    message_blocks,
+                    model,
+                    session_id,
+                    server_config=server_config,
+                    widget=None,
+                    save_message_to_db=True
+                )
+            except Exception as exc:
+                return {"ok": False, "error": f"API request failed: {exc}"}
+
+            update_session_last_model_used(session_id, model)
+
+            self.api_tcp_notifications.put({"session_id": session_id, "new_chat": is_new_chat})
+            if self.session_id == session_id:
+                self.last_model_used = model
+
+            return {
+                "ok": True,
+                "chat_id": session_id,
+                "chat_name": session_name,
+                "model": model,
+                "last_model_used": previous_model,
+                "message": assistant_reply,
+                "server": server_name,
+                "new_chat": is_new_chat
+            }
+
+        # Ephemeral mode (no UI persistence)
+        ephemeral_id = str(chat_id) if chat_id else uuid.uuid4().hex
+        session = self.api_tcp_ephemeral_chats.get(ephemeral_id)
+        is_new_chat = False
+        if session is None:
+            session = {
+                "messages": [],
+                "server": server_name,
+                "model": model,
+                "last_model_used": model,
+                "system_prompt": system_prompt or "",
+                "created_at": current_time,
+                "last_access": current_time,
+            }
+            self.api_tcp_ephemeral_chats[ephemeral_id] = session
+            is_new_chat = True
+        else:
+            if system_prompt is not None:
+                session["system_prompt"] = system_prompt or ""
+            if requested_server:
+                session["server"] = server_name
+            session["last_access"] = current_time
+            session.setdefault("created_at", current_time)
+
+        previous_model = session.get("model", model)
+        history = list(session.get("messages", []))
+        history.append({"role": "user", "content": message})
+
+        message_blocks = list(history)
+        if session.get("system_prompt"):
+            message_blocks.insert(0, {"role": "system", "content": session["system_prompt"]})
+
+        try:
+            assistant_reply = send_to_api(
+                f"API Chat {ephemeral_id[:8]}",
+                message_blocks,
+                model,
+                current_session_id=0,
+                server_config=server_config,
+                widget=None,
+                save_message_to_db=False
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"API request failed: {exc}"}
+
+        history.append({"role": "assistant", "content": assistant_reply})
+        session["messages"] = history
+        session["last_model_used"] = previous_model
+        session["model"] = model
+        session["server"] = server_name
+        session["last_access"] = current_time
+
+        self.api_tcp_notifications.put({"refresh_ephemeral": True})
+        return {
+            "ok": True,
+            "chat_id": ephemeral_id,
+            "model": model,
+            "last_model_used": previous_model,
+            "message": assistant_reply,
+            "server": server_name,
+            "new_chat": is_new_chat,
+            "ephemeral": True
+        }
+
     def open_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("Settings")
-        settings_win.geometry("700x700")
+        settings_win.geometry("900x680")
+        settings_win.grid_columnconfigure(0, weight=1, uniform="settings")
+        settings_win.grid_columnconfigure(1, weight=1, uniform="settings")
+        settings_win.grid_rowconfigure(0, weight=1)
 
-        if self.theme.get() == "dark":
-            settings_win.configure(bg="#2b2b2b")
-            for widget in settings_win.winfo_children():
+        general_frame = ttk.Frame(settings_win)
+        general_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
+        general_frame.grid_columnconfigure(0, weight=1)
+        general_frame.grid_columnconfigure(1, weight=1)
+
+        advanced_frame = ttk.Frame(settings_win)
+        advanced_frame.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
+        advanced_frame.grid_columnconfigure(0, weight=1)
+        advanced_frame.grid_columnconfigure(1, weight=1)
+
+        font_families = sorted(font.families())
+
+        def apply_theme_styles():
+            bg = "#2b2b2b" if self.theme.get() == "dark" else "#f0f0f0"
+            settings_win.configure(bg=bg)
+
+            def update_styles(widget):
                 if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
-                    widget.configure(style="Dark.TLabel")
+                    widget.configure(style="Dark.TLabel" if self.theme.get() == "dark" else "TLabel")
+                for child in widget.winfo_children():
+                    update_styles(child)
 
-        # Theme settings
-        ttk.Label(settings_win, text="Theme:").grid(row=0, column=0, sticky="w", pady=5, padx=20)
-        
+            update_styles(settings_win)
+
         def on_theme_change():
             save_setting("theme", self.theme.get())
             self.apply_theme()
-            # Re-apply theme to settings window
-            if self.theme.get() == "dark":
-                settings_win.configure(bg="#2b2b2b")
-                for widget in settings_win.winfo_children():
-                    if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
-                        widget.configure(style="Dark.TLabel")
-            else:
-                settings_win.configure(bg="#f0f0f0")
-                for widget in settings_win.winfo_children():
-                    if isinstance(widget, (ttk.Label, ttk.Radiobutton)):
-                        widget.configure(style="TLabel")
+            apply_theme_styles()
 
+        general_row = 0
+        ttk.Label(general_frame, text="Theme:").grid(row=general_row, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        general_row += 1
 
-        light_radio = ttk.Radiobutton(settings_win, text="Light", variable=self.theme, value="light", command=on_theme_change)
-        light_radio.grid(row=1, column=0, sticky="w", padx=20)
+        light_radio = ttk.Radiobutton(general_frame, text="Light", variable=self.theme, value="light", command=on_theme_change)
+        light_radio.grid(row=general_row, column=0, sticky="w", padx=(0, 10))
+        dark_radio = ttk.Radiobutton(general_frame, text="Dark", variable=self.theme, value="dark", command=on_theme_change)
+        dark_radio.grid(row=general_row, column=1, sticky="w")
+        general_row += 1
 
-        dark_radio = ttk.Radiobutton(settings_win, text="Dark", variable=self.theme, value="dark", command=on_theme_change)
-        dark_radio.grid(row=2, column=0, sticky="w", padx=20)
+        ttk.Label(general_frame, text="Default Model:").grid(row=general_row, column=0, columnspan=2, sticky="w", pady=(10, 5))
+        general_row += 1
 
-        # Default model settings
-        ttk.Label(settings_win, text="Default Model:").grid(row=3, column=0, sticky="w", pady=5, padx=20)
-        
         auto_summarize_setting = None
         if self.current_server_config:
             auto_summarize_setting = self.current_server_config.get("auto_summarize")
@@ -2419,82 +3162,85 @@ class ChatApp(tk.Tk):
             status_text = "Auto summarize enabled" if value else "Auto summarize disabled"
             self.show_status_message(status_text)
 
-        auto_summarize_check = ttk.Checkbutton(
-            settings_win,
+        ttk.Checkbutton(
+            general_frame,
             text="Auto summarize chats?",
             variable=auto_summarize_var,
             command=on_auto_summarize_change
-        )
-        auto_summarize_check.grid(row=5, column=0, sticky="w", padx=20)
+        ).grid(row=general_row, column=0, columnspan=2, sticky="w")
+        general_row += 1
 
-        # Chat font settings
-        ttk.Label(settings_win, text="Chat Font:").grid(row=6, column=0, sticky="w", pady=5, padx=20)
-        
+        ttk.Label(general_frame, text="Chat Font:").grid(row=general_row, column=0, columnspan=2, sticky="w", pady=(10, 5))
+
         def on_font_change(*args):
             save_setting("chat_font", self.chat_font.get())
             self.apply_font()
 
-        font_families = sorted(font.families())
-        font_dropdown = ttk.Combobox(settings_win, textvariable=self.chat_font, state="readonly", values=font_families)
-        font_dropdown.grid(row=7, column=0, sticky="ew", padx=20)
+        general_row += 1
+        font_dropdown = ttk.Combobox(general_frame, textvariable=self.chat_font, state="readonly", values=font_families)
+        font_dropdown.grid(row=general_row, column=0, columnspan=2, sticky="ew")
         self.chat_font.trace_add("write", on_font_change)
 
-        # Chat font size settings
-        ttk.Label(settings_win, text="Chat Font Size:").grid(row=8, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(general_frame, text="Chat Font Size:").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
 
         def on_font_size_change(*args):
             save_setting("chat_font_size", self.chat_font_size.get())
             self.apply_font()
 
-        font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
-        font_size_spinbox.grid(row=9, column=0, sticky="ew", padx=20)
+        general_row += 2
+        font_size_spinbox = ttk.Spinbox(general_frame, from_=8, to=72, textvariable=self.chat_font_size, command=on_font_size_change)
+        font_size_spinbox.grid(row=general_row, column=0, columnspan=2, sticky="ew")
         self.chat_font_size.trace_add("write", on_font_size_change)
 
-        # UI font settings
-        ttk.Label(settings_win, text="UI Font:").grid(row=10, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(general_frame, text="UI Font:").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
 
         def on_ui_font_change(*args):
             save_setting("ui_font", self.ui_font.get())
             self.apply_ui_font()
 
-        ui_font_dropdown = ttk.Combobox(settings_win, textvariable=self.ui_font, state="readonly", values=font_families)
-        ui_font_dropdown.grid(row=11, column=0, sticky="ew", padx=20)
+        general_row += 2
+        ui_font_dropdown = ttk.Combobox(general_frame, textvariable=self.ui_font, state="readonly", values=font_families)
+        ui_font_dropdown.grid(row=general_row, column=0, columnspan=2, sticky="ew")
         self.ui_font.trace_add("write", on_ui_font_change)
 
-        # UI font size settings
-        ttk.Label(settings_win, text="UI Font Size:").grid(row=12, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(general_frame, text="UI Font Size:").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
 
         def on_ui_font_size_change(*args):
             save_setting("ui_font_size", self.ui_font_size.get())
             self.apply_ui_font()
 
-        ui_font_size_spinbox = ttk.Spinbox(settings_win, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
-        ui_font_size_spinbox.grid(row=13, column=0, sticky="ew", padx=20)
+        general_row += 2
+        ui_font_size_spinbox = ttk.Spinbox(general_frame, from_=8, to=72, textvariable=self.ui_font_size, command=on_ui_font_size_change)
+        ui_font_size_spinbox.grid(row=general_row, column=0, columnspan=2, sticky="ew")
         self.ui_font_size.trace_add("write", on_ui_font_size_change)
 
-        ttk.Label(settings_win, text="Selection Background:").grid(row=14, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(general_frame, text="Selection Background:").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
 
         def choose_sel_bg():
             color = colorchooser.askcolor(initialcolor=self.selection_bg.get())[1]
             if color:
                 self.selection_bg.set(color)
 
-        bg_frame = ttk.Frame(settings_win)
-        bg_frame.grid(row=15, column=0, sticky="ew", padx=20)
-        ttk.Entry(bg_frame, textvariable=self.selection_bg).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).pack(side=tk.LEFT, padx=5)
+        general_row += 2
+        bg_frame = ttk.Frame(general_frame)
+        bg_frame.grid(row=general_row, column=0, columnspan=2, sticky="ew")
+        bg_frame.columnconfigure(0, weight=1)
+        ttk.Entry(bg_frame, textvariable=self.selection_bg).grid(row=0, column=0, sticky="ew")
+        ttk.Button(bg_frame, text="Pick", command=choose_sel_bg).grid(row=0, column=1, padx=(5, 0))
 
-        ttk.Label(settings_win, text="Selection Foreground:").grid(row=16, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(general_frame, text="Selection Foreground:").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
 
         def choose_sel_fg():
             color = colorchooser.askcolor(initialcolor=self.selection_fg.get())[1]
             if color:
                 self.selection_fg.set(color)
 
-        fg_frame = ttk.Frame(settings_win)
-        fg_frame.grid(row=17, column=0, sticky="ew", padx=20)
-        ttk.Entry(fg_frame, textvariable=self.selection_fg).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).pack(side=tk.LEFT, padx=5)
+        general_row += 2
+        fg_frame = ttk.Frame(general_frame)
+        fg_frame.grid(row=general_row, column=0, columnspan=2, sticky="ew")
+        fg_frame.columnconfigure(0, weight=1)
+        ttk.Entry(fg_frame, textvariable=self.selection_fg).grid(row=0, column=0, sticky="ew")
+        ttk.Button(fg_frame, text="Pick", command=choose_sel_fg).grid(row=0, column=1, padx=(5, 0))
 
         def on_selection_color_change(*args):
             save_setting("selection_bg", self.selection_bg.get())
@@ -2504,22 +3250,224 @@ class ChatApp(tk.Tk):
         self.selection_bg.trace_add("write", on_selection_color_change)
         self.selection_fg.trace_add("write", on_selection_color_change)
 
-        # Enable RAG setting
-        ttk.Label(settings_win, text="Enable RAG (requires restart):").grid(row=18, column=0, sticky="w", pady=5, padx=20)
+        ttk.Label(general_frame, text="Enable RAG (requires restart):").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
         rag_var = tk.BooleanVar(value=self.rag_enabled)
+
         def on_rag_toggle():
             save_setting("enable_rag", rag_var.get())
             messagebox.showinfo("Restart Required", "Please restart the application for the RAG setting to take effect.", parent=settings_win)
-        ttk.Checkbutton(settings_win, variable=rag_var, command=on_rag_toggle).grid(row=19, column=0, sticky="w", padx=20)
 
-        ttk.Label(settings_win, text="Validate SSL certificates for URL extraction:").grid(row=20, column=0, sticky="w", pady=5, padx=20)
+        general_row += 2
+        ttk.Checkbutton(general_frame, variable=rag_var, command=on_rag_toggle).grid(row=general_row, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(general_frame, text="Validate SSL certificates for URL extraction:").grid(row=general_row + 1, column=0, columnspan=2, sticky="w", pady=(10, 5))
         url_ssl_var = tk.BooleanVar(value=to_bool(get_setting("validate_url_ssl", "True"), default=True))
 
         def on_url_ssl_toggle():
             save_setting("validate_url_ssl", url_ssl_var.get())
 
-        ttk.Checkbutton(settings_win, variable=url_ssl_var, command=on_url_ssl_toggle).grid(row=21, column=0, sticky="w", padx=20)
+        general_row += 2
+        ttk.Checkbutton(general_frame, variable=url_ssl_var, command=on_url_ssl_toggle).grid(row=general_row, column=0, columnspan=2, sticky="w")
         self.validate_url_ssl_var = url_ssl_var
+
+        # --- Advanced / API panel ---
+        advanced_row = 0
+        ttk.Label(advanced_frame, text="API TCP Bridge:").grid(row=advanced_row, column=0, columnspan=2, sticky="w")
+        advanced_row += 1
+
+        api_tcp_enabled_var = tk.BooleanVar(value=self.api_tcp_enabled)
+        api_tcp_port_var = tk.StringVar(value=str(self.api_tcp_port))
+
+        def apply_api_tcp_port():
+            raw_value = (api_tcp_port_var.get() or "").strip()
+            new_port = self._coerce_tcp_port(raw_value or DEFAULT_API_TCP_PORT)
+            if str(new_port) != raw_value:
+                api_tcp_port_var.set(str(new_port))
+            if new_port != self.api_tcp_port:
+                self.api_tcp_port = new_port
+                save_setting("api_tcp_port", new_port)
+                if self.api_tcp_enabled:
+                    if self.restart_api_tcp_server(silent=True):
+                        self.show_status_message(f"API TCP server listening on port {new_port}", duration=2500)
+                    else:
+                        self.show_status_message("Failed to restart API TCP server; disabling.", duration=4000)
+                        api_tcp_enabled_var.set(False)
+                        self.api_tcp_enabled = False
+                        save_setting("enable_api_tcp_server", "False")
+
+        def on_api_tcp_toggle():
+            new_value = api_tcp_enabled_var.get()
+            self.api_tcp_enabled = new_value
+            save_setting("enable_api_tcp_server", "True" if new_value else "False")
+            if new_value:
+                apply_api_tcp_port()
+                if not self.start_api_tcp_server():
+                    api_tcp_enabled_var.set(False)
+                    self.api_tcp_enabled = False
+                    save_setting("enable_api_tcp_server", "False")
+            else:
+                self.stop_api_tcp_server()
+
+        ttk.Checkbutton(
+            advanced_frame,
+            text="Enable API TCP server",
+            variable=api_tcp_enabled_var,
+            command=on_api_tcp_toggle
+        ).grid(row=advanced_row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        advanced_row += 1
+
+        ttk.Label(advanced_frame, text="TCP Port:").grid(row=advanced_row, column=0, sticky="w")
+        port_entry = ttk.Entry(advanced_frame, textvariable=api_tcp_port_var, width=12)
+        port_entry.grid(row=advanced_row, column=1, sticky="w")
+        port_entry.bind("<FocusOut>", lambda event: apply_api_tcp_port())
+        port_entry.bind("<Return>", lambda event: (apply_api_tcp_port(), "break"))
+        advanced_row += 1
+
+        server_names = self.server_manager.list_server_names()
+        initial_api_server = self.api_tcp_default_server if self.api_tcp_default_server in server_names else ""
+        if not initial_api_server:
+            if self.current_server_config:
+                initial_api_server = self.current_server_config.get("name")
+            elif server_names:
+                initial_api_server = server_names[0]
+        api_tcp_server_var = tk.StringVar(value=initial_api_server or "")
+        if initial_api_server and initial_api_server != self.api_tcp_default_server:
+            self.api_tcp_default_server = initial_api_server
+            save_setting("api_tcp_default_server", initial_api_server)
+
+        ttk.Label(advanced_frame, text="Default Server:").grid(row=advanced_row, column=0, sticky="w")
+        server_combo = ttk.Combobox(advanced_frame, textvariable=api_tcp_server_var, state="readonly", values=server_names)
+        server_combo.grid(row=advanced_row, column=1, sticky="ew")
+        advanced_row += 1
+
+        api_tcp_model_var = tk.StringVar(value=self.api_tcp_default_model or "")
+        ttk.Label(advanced_frame, text="Default Model:").grid(row=advanced_row, column=0, sticky="w")
+        model_combo = ttk.Combobox(advanced_frame, textvariable=api_tcp_model_var, state="readonly", values=[])
+        model_combo.grid(row=advanced_row, column=1, sticky="ew")
+        advanced_row += 1
+
+        def on_api_tcp_model_change(*_):
+            selected = api_tcp_model_var.get()
+            if selected != self.api_tcp_default_model:
+                self.api_tcp_default_model = selected
+                save_setting("api_tcp_default_model", selected)
+
+        api_tcp_model_var.trace_add("write", on_api_tcp_model_change)
+
+        def refresh_api_tcp_model_options(server_name):
+            server_config = self.server_manager.get_server(server_name) if server_name else None
+            models = []
+            if server_config:
+                try:
+                    models = get_available_models(server_config)
+                except Exception as exc:
+                    print(f"Failed to fetch models for {server_name}: {exc}")
+                    models = []
+            model_combo['values'] = models
+            if models:
+                preferred = api_tcp_model_var.get() or server_config.get("default_model") or models[0]
+                if preferred not in models:
+                    preferred = server_config.get("default_model") or models[0]
+                api_tcp_model_var.set(preferred)
+            else:
+                api_tcp_model_var.set("")
+
+        def on_api_tcp_server_change(event=None):
+            selected = api_tcp_server_var.get()
+            if selected != self.api_tcp_default_server:
+                self.api_tcp_default_server = selected
+                save_setting("api_tcp_default_server", selected)
+            refresh_api_tcp_model_options(selected)
+
+        server_combo.bind("<<ComboboxSelected>>", on_api_tcp_server_change)
+        refresh_api_tcp_model_options(api_tcp_server_var.get())
+
+        api_tcp_create_ui_var = tk.BooleanVar(value=self.api_tcp_create_ui_chats)
+        api_tcp_folder_var = tk.StringVar(value=self.get_api_folder_name())
+
+        def apply_api_folder_name():
+            raw_value = (api_tcp_folder_var.get() or "").strip()
+            if not raw_value:
+                raw_value = "API Chats"
+                api_tcp_folder_var.set(raw_value)
+            if raw_value != self.api_tcp_folder_name:
+                self.api_tcp_folder_name = raw_value
+                self.reset_api_folder_cache()
+                save_setting("api_tcp_folder_name", raw_value)
+
+        def update_folder_entry_state():
+            state = "normal" if api_tcp_create_ui_var.get() else "disabled"
+            folder_entry.configure(state=state)
+
+        def on_api_tcp_create_ui_toggle():
+            new_value = api_tcp_create_ui_var.get()
+            if new_value != self.api_tcp_create_ui_chats:
+                self.api_tcp_create_ui_chats = new_value
+                save_setting("api_tcp_create_ui_chats", "True" if new_value else "False")
+            update_folder_entry_state()
+            if new_value:
+                apply_api_folder_name()
+
+        ttk.Checkbutton(
+            advanced_frame,
+            text="Create API chats as UI chats",
+            variable=api_tcp_create_ui_var,
+            command=on_api_tcp_create_ui_toggle
+        ).grid(row=advanced_row, column=0, columnspan=2, sticky="w", pady=(5, 10))
+        advanced_row += 1
+
+        ttk.Label(advanced_frame, text="Default Folder:").grid(row=advanced_row, column=0, sticky="w")
+        folder_entry = ttk.Entry(advanced_frame, textvariable=api_tcp_folder_var)
+        folder_entry.grid(row=advanced_row, column=1, sticky="ew")
+        folder_entry.bind("<FocusOut>", lambda event: apply_api_folder_name())
+        folder_entry.bind("<Return>", lambda event: (apply_api_folder_name(), "break"))
+        advanced_row += 1
+        update_folder_entry_state()
+
+        ttk.Separator(advanced_frame, orient="horizontal").grid(row=advanced_row, column=0, columnspan=2, sticky="ew", pady=(5, 10))
+        advanced_row += 1
+
+        ttk.Label(advanced_frame, text="Ephemeral Chats:").grid(row=advanced_row, column=0, columnspan=2, sticky="w")
+        advanced_row += 1
+
+        self._ephemeral_stats_var = tk.StringVar(value="")
+        stats_label = ttk.Label(advanced_frame, textvariable=self._ephemeral_stats_var)
+        stats_label.grid(row=advanced_row, column=0, columnspan=2, sticky="w")
+        advanced_row += 1
+        self.refresh_ephemeral_stats_label()
+
+        ttk.Button(advanced_frame, text="Clear Ephemeral Chats", command=self.clear_ephemeral_chats).grid(
+            row=advanced_row, column=0, columnspan=2, sticky="w", pady=(5, 10)
+        )
+        advanced_row += 1
+
+        ttk.Label(advanced_frame, text="Auto-clear after (minutes):").grid(row=advanced_row, column=0, sticky="w")
+        ephemeral_ttl_var = tk.StringVar(value=str(self.api_tcp_ephemeral_ttl_minutes))
+
+        def apply_ephemeral_ttl():
+            raw_value = (ephemeral_ttl_var.get() or "").strip()
+            new_value = self._coerce_positive_int(raw_value or self.api_tcp_ephemeral_ttl_minutes, default=self.api_tcp_ephemeral_ttl_minutes)
+            new_value = min(1440, new_value)
+            if str(new_value) != raw_value:
+                ephemeral_ttl_var.set(str(new_value))
+            if new_value != self.api_tcp_ephemeral_ttl_minutes:
+                self.api_tcp_ephemeral_ttl_minutes = new_value
+                save_setting("api_tcp_ephemeral_ttl_minutes", new_value)
+                self.schedule_ephemeral_cleanup()
+
+        ttl_spin = ttk.Spinbox(advanced_frame, from_=1, to=1440, textvariable=ephemeral_ttl_var, width=8, command=apply_ephemeral_ttl)
+        ttl_spin.grid(row=advanced_row, column=1, sticky="w")
+        ttl_spin.bind("<FocusOut>", lambda event: apply_ephemeral_ttl())
+        ttl_spin.bind("<Return>", lambda event: (apply_ephemeral_ttl(), "break"))
+        advanced_row += 1
+
+        def on_settings_close():
+            apply_api_folder_name()
+            self._ephemeral_stats_var = None
+            settings_win.destroy()
+
+        settings_win.protocol("WM_DELETE_WINDOW", on_settings_close)
+        apply_theme_styles()
 
     def export_chat(self, session_id=None, default_name=None):
         session_id = session_id or self.session_id
@@ -3591,6 +4539,20 @@ class ChatApp(tk.Tk):
             summary_model = self.model_var.get()
             new_name = self._generate_chat_title(self.session_id, conversation, self.session_name, summary_model)
 
+            def ensure_api_prefix(candidate, original):
+                if not original:
+                    return candidate
+                if not candidate:
+                    return candidate
+                prefixes = ["API:", "API Chat:"]
+                if any(original.startswith(prefix) for prefix in prefixes):
+                    base = candidate.lstrip()
+                    if not any(base.startswith(prefix) for prefix in prefixes):
+                        return f"API: {base}" if base else "API:"
+                return candidate
+
+            new_name = ensure_api_prefix(new_name, self.session_name)
+
             if new_name and new_name != self.session_name and len(new_name.split()) <= 7:
                 item_to_select = self.find_tree_item_by_id(self.session_id)
                 if not item_to_select:
@@ -3688,6 +4650,12 @@ class ChatApp(tk.Tk):
 
         if not new_title:
             new_title = f"{self.session_name} Summary"
+
+        prefixes = ["API:", "API Chat:"]
+        if any((self.session_name or "").startswith(prefix) for prefix in prefixes):
+            base = new_title.lstrip()
+            if not any(base.startswith(prefix) for prefix in prefixes):
+                new_title = f"API: {base}" if base else "API:" 
 
         record = self._get_session_record(session_id)
         parent_id = None
