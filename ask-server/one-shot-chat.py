@@ -53,13 +53,14 @@ def read_cli_payload() -> str:
     if len(sys.argv) > 1:
         return " ".join(sys.argv[1:]).strip()
 
-    data = sys.stdin.read().strip()
-    if data:
-        return data
+    if not sys.stdin.isatty():
+        chunk = sys.stdin.read()
+        if chunk:
+            return chunk.strip()
 
     raise InputError(
         "No input provided. Supply key/value pairs such as "
-        "m:'Hello' s:'Proxy Server' via CLI args or STDIN."
+        "m:'Hello' s:'Proxy Server' via CLI args or pipe data into stdin."
     )
 
 
