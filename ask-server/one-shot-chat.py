@@ -73,10 +73,12 @@ def parse_payload(raw: str) -> Dict[str, str]:
     )
 
     result: Dict[str, str] = {}
+    consumed_spans = []
     for match in pattern.finditer(raw):
         key = match.group("key").lower()
         value = match.group("sq") or match.group("dq") or match.group("bare") or ""
         result[key] = value.strip()
+        consumed_spans.append((match.start(), match.end()))
 
     if not result:
         for line in raw.splitlines():
@@ -87,6 +89,16 @@ def parse_payload(raw: str) -> Dict[str, str]:
             key = key.strip().lower()
             if key in {"s", "md", "p", "c", "m"}:
                 result[key] = value.strip()
+
+    if "m" not in result and raw.strip():
+        if consumed_spans:
+            message_candidate = list(raw)
+            for start, end in consumed_spans:
+                for idx in range(start, end):
+                    message_candidate[idx] = " "
+            message_text = "".join(message_candidate).strip()
+            if message_text:
+                result["m"] = message_text
 
     if not result:
         result["m"] = raw.strip()
@@ -209,9 +221,16 @@ def main() -> int:
     if chat_id is None:
         chat_id = resolved.get("c") or ""
 
-    print(f"c:{_make_printable(chat_id)}")
-    print(f"m:{_make_printable(message)}")
-    print(f"md:{_make_printable(model_used)}")
+    divider = "-" * 20
+    printable_chat = _make_printable(chat_id)
+    printable_model = _make_printable(model_used)
+    printable_message = _make_printable(message)
+
+    print(divider)
+    print(f"c:{printable_chat} [[(md:{printable_model})]]")
+    print(divider)
+    print(printable_message)
+    print(divider)
     return 0
 
 
