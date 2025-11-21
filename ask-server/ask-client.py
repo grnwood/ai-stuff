@@ -1504,8 +1504,20 @@ class ChatApp(tk.Tk):
         self.api_tcp_host = get_setting("api_tcp_host", DEFAULT_API_TCP_HOST) or DEFAULT_API_TCP_HOST
         default_server_name = self.current_server_config["name"] if self.current_server_config else ""
         default_model_name = self.current_server_config.get("default_model") if self.current_server_config else ""
-        self.api_tcp_default_server = get_setting("api_tcp_default_server", "") or default_server_name
-        self.api_tcp_default_model = get_setting("api_tcp_default_model", "") or (default_model_name or "")
+        stored_default_server = get_setting("api_tcp_default_server", "") or default_server_name
+        stored_default_model = get_setting("api_tcp_default_model", "") or (default_model_name or "")
+        if stored_default_server:
+            default_config = self.server_manager.get_server(stored_default_server)
+            if default_config:
+                self.current_server_config = default_config
+                self.server_manager.set_active_server(stored_default_server)
+                set_current_server_config(default_config)
+        self.api_tcp_default_server = stored_default_server or (self.current_server_config["name"] if self.current_server_config else "")
+        if stored_default_model:
+            default_model_name = stored_default_model
+            if self.current_server_config:
+                self.current_server_config["default_model"] = stored_default_model
+        self.api_tcp_default_model = stored_default_model or (self.current_server_config.get("default_model") if self.current_server_config else "")
         self.api_tcp_create_ui_chats = to_bool(get_setting("api_tcp_create_ui_chats", "False"), default=False)
         self.api_tcp_ephemeral_ttl_minutes = self._coerce_positive_int(get_setting("api_tcp_ephemeral_ttl_minutes", "60"), default=60)
         self.api_tcp_folder_name = (get_setting("api_tcp_folder_name", "API Chats") or "API Chats").strip() or "API Chats"
@@ -1519,7 +1531,7 @@ class ChatApp(tk.Tk):
         self.api_server_cache_ttl = DEFAULT_API_SERVER_CACHE_TTL
         self.api_server_cache_lock = threading.Lock()
 
-        initial_server_name = self.current_server_config["name"] if self.current_server_config else ""
+        initial_server_name = self.api_tcp_default_server or (self.current_server_config["name"] if self.current_server_config else "")
         self.server_var = tk.StringVar(value=initial_server_name)
 
         self.theme = tk.StringVar(value=get_setting("theme", "light"))
@@ -3237,7 +3249,90 @@ class ChatApp(tk.Tk):
         dark_radio.grid(row=general_row, column=1, sticky="w")
         general_row += 1
 
+        ttk.Label(general_frame, text="Default Server:").grid(row=general_row, column=0, columnspan=2, sticky="w", pady=(10, 5))
+        general_row += 1
+
+        server_names = self.server_manager.list_server_names()
+        initial_server = self.api_tcp_default_server or (self.current_server_config.get("name") if self.current_server_config else "")
+        if initial_server not in server_names and server_names:
+            initial_server = server_names[0]
+        default_server_var = tk.StringVar(value=initial_server)
+        default_model_initial = self.api_tcp_default_model or (self.current_server_config.get("default_model") if self.current_server_config else "")
+        default_model_var = tk.StringVar(value=default_model_initial)
+
+        def fetch_models_for_server(server_name):
+            config = self.server_manager.get_server(server_name) if server_name else None
+            if not config:
+                return []
+            try:
+                return get_available_models(config)
+            except Exception as exc:
+                print(f"Failed to load models for {server_name}: {exc}")
+                return []
+
+        def on_default_server_change(event=None):
+            selected = default_server_var.get()
+            server_changed = bool(selected) and selected != self.api_tcp_default_server
+            if server_changed:
+                self.api_tcp_default_server = selected
+                save_setting("api_tcp_default_server", selected)
+                self.show_status_message(f"Default API server set to {selected}")
+                if selected:
+                    self.refresh_server_dropdown(select_name=selected)
+            server_config = self.server_manager.get_server(selected) if selected else None
+            suggested_model = ""
+            if server_config:
+                suggested_model = server_config.get("default_model") or ""
+            models_for_server = fetch_models_for_server(selected)
+            if models_for_server:
+                default_model_combo['values'] = models_for_server
+            else:
+                default_model_combo['values'] = ()
+            if not default_model_var.get() and suggested_model:
+                default_model_var.set(suggested_model)
+            if server_changed and suggested_model:
+                default_model_var.set(suggested_model)
+                self.api_tcp_default_model = suggested_model
+                save_setting("api_tcp_default_model", suggested_model)
+                self.show_status_message(f"Default API model set to {suggested_model}")
+                if self.current_server_config and self.current_server_config.get("name") == selected:
+                    self.update_current_server_config({"default_model": suggested_model})
+
+        server_dropdown = ttk.Combobox(general_frame, textvariable=default_server_var, state="readonly", values=server_names)
+        server_dropdown.grid(row=general_row, column=0, columnspan=2, sticky="ew")
+        server_dropdown.bind("<<ComboboxSelected>>", on_default_server_change)
+        general_row += 1
+
         ttk.Label(general_frame, text="Default Model:").grid(row=general_row, column=0, columnspan=2, sticky="w", pady=(10, 5))
+        general_row += 1
+
+        initial_model_list = fetch_models_for_server(default_server_var.get())
+        if default_model_initial and default_model_initial not in initial_model_list:
+            initial_model_list.append(default_model_initial)
+
+        def on_default_model_change(event=None):
+            selected = (default_model_var.get() or "").strip()
+            if not selected:
+                return
+            if selected != self.api_tcp_default_model:
+                self.api_tcp_default_model = selected
+                save_setting("api_tcp_default_model", selected)
+                self.show_status_message(f"Default API model set to {selected}")
+            target_server = default_server_var.get()
+            if target_server and self.current_server_config and self.current_server_config.get("name") == target_server:
+                self.update_current_server_config({"default_model": selected})
+                if self.server_var.get() == target_server:
+                    self.refresh_model_dropdown(initial=True, preferred_model=selected)
+
+        default_model_combo = ttk.Combobox(general_frame, textvariable=default_model_var, state="readonly")
+        default_model_combo['values'] = initial_model_list
+        default_model_combo.grid(row=general_row, column=0, columnspan=2, sticky="ew")
+        default_model_combo.bind("<<ComboboxSelected>>", on_default_model_change)
+        if default_server_var.get():
+            on_default_server_change()
+        general_row += 1
+
+        ttk.Separator(general_frame, orient="horizontal").grid(row=general_row, column=0, columnspan=2, sticky="ew", pady=(10, 5))
         general_row += 1
 
         auto_summarize_setting = None
@@ -3452,53 +3547,6 @@ class ChatApp(tk.Tk):
         if initial_api_server and initial_api_server != self.api_tcp_default_server:
             self.api_tcp_default_server = initial_api_server
             save_setting("api_tcp_default_server", initial_api_server)
-
-        ttk.Label(advanced_frame, text="Default Server:").grid(row=advanced_row, column=0, sticky="w")
-        server_combo = ttk.Combobox(advanced_frame, textvariable=api_tcp_server_var, state="readonly", values=server_names)
-        server_combo.grid(row=advanced_row, column=1, sticky="ew")
-        advanced_row += 1
-
-        api_tcp_model_var = tk.StringVar(value=self.api_tcp_default_model or "")
-        ttk.Label(advanced_frame, text="Default Model:").grid(row=advanced_row, column=0, sticky="w")
-        model_combo = ttk.Combobox(advanced_frame, textvariable=api_tcp_model_var, state="readonly", values=[])
-        model_combo.grid(row=advanced_row, column=1, sticky="ew")
-        advanced_row += 1
-
-        def on_api_tcp_model_change(*_):
-            selected = api_tcp_model_var.get()
-            if selected != self.api_tcp_default_model:
-                self.api_tcp_default_model = selected
-                save_setting("api_tcp_default_model", selected)
-
-        api_tcp_model_var.trace_add("write", on_api_tcp_model_change)
-
-        def refresh_api_tcp_model_options(server_name):
-            server_config = self.server_manager.get_server(server_name) if server_name else None
-            models = []
-            if server_config:
-                try:
-                    models = get_available_models(server_config)
-                except Exception as exc:
-                    print(f"Failed to fetch models for {server_name}: {exc}")
-                    models = []
-            model_combo['values'] = models
-            if models:
-                preferred = api_tcp_model_var.get() or server_config.get("default_model") or models[0]
-                if preferred not in models:
-                    preferred = server_config.get("default_model") or models[0]
-                api_tcp_model_var.set(preferred)
-            else:
-                api_tcp_model_var.set("")
-
-        def on_api_tcp_server_change(event=None):
-            selected = api_tcp_server_var.get()
-            if selected != self.api_tcp_default_server:
-                self.api_tcp_default_server = selected
-                save_setting("api_tcp_default_server", selected)
-            refresh_api_tcp_model_options(selected)
-
-        server_combo.bind("<<ComboboxSelected>>", on_api_tcp_server_change)
-        refresh_api_tcp_model_options(api_tcp_server_var.get())
 
         api_tcp_create_ui_var = tk.BooleanVar(value=self.api_tcp_create_ui_chats)
         api_tcp_folder_var = tk.StringVar(value=self.get_api_folder_name())
@@ -4229,9 +4277,11 @@ class ChatApp(tk.Tk):
 
     def new_session(self, parent_id=None):
         name = f"Session {len(get_sessions()) + 1}"
-        default_model = None
-        if self.current_server_config:
-            default_model = self.current_server_config.get("default_model")
+        active_server_name = self.server_var.get() or self.api_tcp_default_server
+        if active_server_name and (not self.current_server_config or self.current_server_config.get("name") != active_server_name):
+            self.refresh_server_dropdown(select_name=active_server_name)
+
+        default_model = self.api_tcp_default_model or (self.current_server_config.get("default_model") if self.current_server_config else None)
         available_models = get_available_models(self.current_server_config)
         if not default_model or default_model not in available_models:
             default_model = available_models[0] if available_models else "gpt-3.5-turbo"

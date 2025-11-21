@@ -93,7 +93,7 @@ console.log("resp: "+JSON.stringify(data))
 
     openaiRes.body.on('data', chunk => {
       res.write(chunk)
-    })
+    }) 
 
     openaiRes.body.on('end', () => res.end())
 
